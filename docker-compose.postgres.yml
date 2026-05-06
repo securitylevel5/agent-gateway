@@ -15,5 +15,21 @@ services:
     volumes:
       - agent-gateway-postgres:/var/lib/postgresql/data
 
+  # Bridges OTLP gRPC from the (host-running) gateway to OTLP HTTP/JSON on
+  # the (host-running) dashboard's /v1/traces endpoint.
+  otel-collector:
+    image: otel/opentelemetry-collector:0.111.0
+    command: ["--config=/etc/otel-collector.yaml"]
+    volumes:
+      - ./dashboard/otel-collector.yaml:/etc/otel-collector.yaml:ro
+    ports:
+      - "4317:4317"      # OTLP gRPC (gateway sends here)
+    extra_hosts:
+      # Lets the collector reach the dashboard running on the host.
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   agent-gateway-postgres:

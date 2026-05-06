@@ -1,3 +1,8 @@
 /target
 .cursor/
 __pycache__/
+
+# Dev stack runtime state created by scripts/up.sh
+.run/
+config.toml
+certs/

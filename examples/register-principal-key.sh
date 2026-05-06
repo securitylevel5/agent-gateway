@@ -140,6 +140,11 @@ create_token() {
     echo "Could not determine tpm2-pkcs11 primary id from tpm2_ptool init output" >&2
     exit 1
   fi
+  # tpm2_ptool init leaves leaked transient handles (from tpm2_createprimary and
+  # tpm2_evictcontrol) that consume all of swtpm's transient object slots.
+  # Flush them so addtoken can load the persistent primary for tpm2_create.
+  tpm2_flushcontext --transient-object 2>/dev/null || true
+
   if [[ -z "$SO_PIN" ]]; then
     SO_PIN="$(prompt_secret "New TPM token SO PIN: ")"
   fi

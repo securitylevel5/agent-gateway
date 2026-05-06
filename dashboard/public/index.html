@@ -1,0 +1,924 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Gateway Dashboard</title>
+<link rel="stylesheet" href="/theme.css">
+<style>
+  .grid {
+    grid-template-columns: 65fr 35fr;
+    grid-template-rows: 72fr 28fr;
+  }
+
+  .right-top {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-height: 0;
+  }
+
+  .right-top #panel-status { flex: 0 0 auto; }
+  .right-top #panel-registry { flex: 1; min-height: 0; }
+
+  #panel-topology {
+    overflow: hidden;
+    position: relative;
+  }
+
+  .status-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 16px;
+  }
+
+  .status-label {
+    color: var(--color-blue);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 11px;
+    margin-right: 2px;
+  }
+
+  .btn-reset {
+    padding: 2px 8px;
+    font-size: 10px;
+    font-family: var(--font-sans);
+    font-weight: 500;
+    color: var(--color-muted);
+    background: transparent;
+    border: 1px solid rgba(139, 148, 158, 0.35);
+    border-radius: 4px;
+    cursor: pointer;
+    text-transform: none;
+    letter-spacing: normal;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+  }
+
+  .btn-reset:hover {
+    color: var(--color-text);
+    background: rgba(139, 148, 158, 0.1);
+    border-color: rgba(139, 148, 158, 0.4);
+  }
+
+  .panel-content {
+    flex: 1;
+    overflow-y: auto;
+  }
+
+
+  .gw-row {
+    padding: 4px 10px;
+    border-bottom: 1px solid var(--color-border-faint);
+    font-size: 11px;
+    line-height: 1.35;
+  }
+
+  .gw-row-top {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .gw-agent {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--color-muted);
+    flex-shrink: 0;
+  }
+
+  .gw-host {
+    font-size: 10px;
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .gw-badge {
+    font-size: 9px;
+    font-weight: 700;
+    padding: 1px 5px;
+    border-radius: 3px;
+    flex-shrink: 0;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .gw-badge-allowed {
+    color: var(--color-green);
+    background: rgba(63, 185, 80, 0.12);
+  }
+
+  .gw-badge-denied {
+    color: var(--color-red);
+    background: rgba(248, 81, 73, 0.12);
+  }
+
+  .gw-row.gw-denied {
+    background: rgba(248, 81, 73, 0.06);
+  }
+
+  .gw-reason {
+    font-size: 9px;
+    color: var(--color-muted);
+    padding-left: 2px;
+    margin-top: 1px;
+  }
+
+  .gw-time {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--color-muted);
+    flex-shrink: 0;
+  }
+
+  /* ============================================================
+     Topology styles
+     ============================================================ */
+
+  .topology-canvas {
+    position: relative;
+  }
+
+  /* --- SVG edges layer --- */
+  .edges-layer {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 1;
+  }
+
+  .edge {
+    stroke: var(--color-edge);
+    stroke-width: 1.5;
+    fill: none;
+  }
+  .edge.active {
+    stroke: var(--color-blue);
+    stroke-width: 2;
+  }
+  .edge.dashed {
+    stroke: var(--color-edge);
+    stroke-width: 1.5;
+    stroke-dasharray: 6 4;
+    fill: none;
+  }
+  .edge.dashed.active {
+    stroke: var(--color-blue);
+    stroke-width: 2;
+    stroke-dasharray: 6 4;
+  }
+
+  .arrow-default { fill: var(--color-edge); }
+  .arrow-active  { fill: var(--color-blue); }
+  .edge.denied {
+    stroke: var(--color-red);
+    stroke-width: 2;
+  }
+  .arrow-denied  { fill: var(--color-red); }
+
+  /* --- Zones --- */
+  .zone {
+    position: absolute;
+    border: 1.5px dashed;
+    border-radius: 16px;
+    pointer-events: none;
+  }
+  .zone-label {
+    position: absolute;
+    top: 10px;
+    left: 16px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    opacity: 0.6;
+  }
+
+  /* Organization network zone */
+  .zone.org {
+    border-color: rgba(88, 166, 255, 0.25);
+    background: rgba(88, 166, 255, 0.03);
+  }
+  .zone.org .zone-label { color: var(--color-blue); }
+
+  /* Agent platform zone */
+  .zone.agent-platform-zone {
+    border: 1.5px solid rgba(188, 140, 255, 0.3);
+    background: rgba(188, 140, 255, 0.04);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  .zone.agent-platform-zone .zone-header {
+    background: rgba(188, 140, 255, 0.08);
+    border-bottom: 1px solid rgba(188, 140, 255, 0.15);
+    padding: 8px 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .zone.agent-platform-zone .zone-header-icon {
+    color: var(--color-purple);
+    opacity: 0.6;
+    display: flex;
+  }
+  .zone.agent-platform-zone .zone-label {
+    position: static;
+    color: var(--color-purple);
+    opacity: 0.7;
+  }
+
+  /* Infrastructure zone */
+  .zone.infrastructure {
+    border-color: rgba(240, 136, 62, 0.25);
+    background: rgba(240, 136, 62, 0.03);
+  }
+  .zone.infrastructure .zone-label { color: var(--color-orange); }
+
+  /* Notes zone */
+  .zone.notes {
+    border-style: solid;
+    border-color: rgba(139, 148, 158, 0.25);
+    background: rgba(139, 148, 158, 0.03);
+  }
+  .zone.notes .zone-label { color: var(--color-muted); }
+  .zone-notes-list {
+    position: absolute;
+    top: 8px;
+    left: 16px;
+    right: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .zone-note {
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--color-muted);
+    opacity: 0.7;
+    padding-left: 8px;
+    text-indent: -8px;
+  }
+  .zone-note::before {
+    content: '\2022  ';
+  }
+
+  /* --- Sub-zones --- */
+  .sub-zone {
+    position: absolute;
+    border: 1px solid rgba(88, 166, 255, 0.12);
+    border-radius: 10px;
+    background: rgba(88, 166, 255, 0.03);
+    pointer-events: none;
+  }
+  .sub-zone-purple {
+    border-color: rgba(188, 140, 255, 0.12);
+    background: rgba(188, 140, 255, 0.03);
+  }
+  .sub-zone-blue {
+    border-color: rgba(88, 166, 255, 0.18);
+    background: rgba(88, 166, 255, 0.05);
+  }
+  .sub-zone-label-blue {
+    color: var(--color-blue);
+  }
+  .sub-zone-label {
+    position: absolute;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    color: var(--color-blue);
+    opacity: 0.5;
+  }
+
+  /* --- Nodes --- */
+  .node {
+    position: absolute;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    user-select: none;
+    z-index: 5;
+  }
+
+  .node-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    border: 1.5px solid;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.3);
+  }
+
+  .node-label {
+    font-weight: 500;
+    color: var(--color-text);
+    white-space: nowrap;
+    text-align: center;
+    position: relative;
+    z-index: 10;
+    text-shadow: 0 0 4px var(--color-bg), 0 0 8px var(--color-bg);
+  }
+
+  /* Organization network nodes */
+  .node.org-node .node-icon {
+    background: rgba(88, 166, 255, 0.08);
+    border-color: rgba(88, 166, 255, 0.3);
+    color: var(--color-blue);
+  }
+
+  /* Infrastructure nodes */
+  .node.infrastructure-node .node-icon {
+    background: rgba(240, 136, 62, 0.08);
+    border-color: rgba(240, 136, 62, 0.3);
+    color: var(--color-orange);
+  }
+
+  /* Gateway node */
+  .node.gateway .node-icon {
+    background: #0f1923;
+    border-color: rgba(88, 166, 255, 0.5);
+    box-shadow: 0 0 30px rgba(88, 166, 255, 0.2), 0 2px 16px rgba(0,0,0,0.3);
+  }
+
+  /* Agent platform and runtime nodes */
+  .node.agent .node-icon {
+    background: rgba(188, 140, 255, 0.06);
+    border-color: rgba(188, 140, 255, 0.35);
+    color: var(--color-purple);
+  }
+  .node.agent .node-label {
+    font-family: var(--font-mono);
+  }
+
+  /* ============================================================
+     Audit Log panel styles
+     ============================================================ */
+  .audit-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 10px;
+    font-size: 11px;
+    line-height: 1.4;
+    border-bottom: 1px solid var(--color-border-faint);
+  }
+
+  .audit-row.audit-denied {
+    background: rgba(248, 81, 73, 0.08);
+  }
+
+  .audit-ts {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--color-muted);
+    flex-shrink: 0;
+  }
+
+  .audit-source {
+    font-size: 9px;
+    font-weight: 600;
+    padding: 1px 5px;
+    border-radius: 3px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .audit-source-agent-gateway    { background: rgba(88,166,255,0.15);  color: var(--color-blue); }
+  .audit-source-agent-platform   { background: rgba(188,140,255,0.15); color: var(--color-purple); }
+  .audit-source-user             { background: rgba(63,185,80,0.15);   color: var(--color-green); }
+
+  .audit-event {
+    font-size: 10px;
+    color: var(--color-muted);
+    flex-shrink: 0;
+  }
+
+  .audit-summary {
+    font-size: 10px;
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Authority Registry panel */
+  .registry-section {
+    border-bottom: 1px solid var(--color-border-faint);
+  }
+  .registry-section:last-child { border-bottom: none; }
+
+  .registry-section-header {
+    padding: 4px 10px;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--color-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  .registry-row {
+    padding: 3px 10px;
+    font-size: 11px;
+    line-height: 1.4;
+    border-bottom: 1px solid var(--color-border-faint);
+  }
+  .registry-row:last-child { border-bottom: none; }
+
+  .registry-id {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--color-text);
+  }
+
+  .registry-meta {
+    font-size: 9px;
+    color: var(--color-muted);
+    margin-top: 1px;
+  }
+
+  .registry-perms {
+    font-size: 10px;
+    color: var(--color-muted);
+    margin-top: 1px;
+  }
+
+  .registry-empty {
+    padding: 3px 10px;
+    font-size: 10px;
+    color: var(--color-muted);
+    font-style: italic;
+  }
+
+  .registry-error {
+    padding: 6px 10px;
+    font-size: 11px;
+    color: var(--color-red);
+    border-bottom: 1px solid var(--color-border-faint);
+  }
+
+</style>
+</head>
+<body>
+  <div class="grid">
+    <div id="panel-topology">
+
+        <!-- Topology diagram -->
+        <div class="topology-canvas" id="canvas">
+
+          <!-- Zones -->
+          <div class="zone org" id="zone-org">
+            <span class="zone-label">Organization Network</span>
+          </div>
+
+          <div class="zone agent-platform-zone" id="zone-ap">
+            <div class="zone-header">
+              <span class="zone-header-icon" id="ap-header-icon"></span>
+              <span class="zone-label">Agent Cluster</span>
+            </div>
+          </div>
+
+          <div class="zone infrastructure" id="zone-infra">
+            <span class="zone-label">Infrastructure</span>
+          </div>
+
+          <div class="zone notes" id="zone-notes">
+            <div class="zone-notes-list">
+              <span class="zone-note">The agent-platform handles lifecycle and connects each agent to the gateway.</span>
+              <span class="zone-note">Agent runtimes use Claude Code as the agent framework.</span>
+              <span class="zone-note">Inference requests tunnel through the gateway directly to api.anthropic.com.</span>
+            </div>
+          </div>
+
+          <!-- Agent runtimes sub-zone -->
+          <div class="sub-zone sub-zone-purple" id="subzone-agent-runtimes"></div>
+
+          <!-- User devices sub-zone -->
+          <div class="sub-zone sub-zone-blue" id="subzone-users"></div>
+          <span class="sub-zone-label sub-zone-label-blue" id="label-users">Users</span>
+
+          <!-- Example services sub-zone -->
+          <div class="sub-zone" id="subzone-example-services"></div>
+          <span class="sub-zone-label" id="label-example-services">Example Services</span>
+
+          <!-- SVG edges layer -->
+          <svg class="edges-layer" id="edges" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <marker id="arrow-default-end" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+                <polygon points="0 0, 8 3, 0 6" class="arrow-default"/>
+              </marker>
+              <marker id="arrow-default-start" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto-start-reverse">
+                <polygon points="0 0, 8 3, 0 6" class="arrow-default"/>
+              </marker>
+              <marker id="arrow-active-end" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+                <polygon points="0 0, 8 3, 0 6" class="arrow-active"/>
+              </marker>
+              <marker id="arrow-active-start" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto-start-reverse">
+                <polygon points="0 0, 8 3, 0 6" class="arrow-active"/>
+              </marker>
+              <marker id="arrow-denied-end" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+                <polygon points="0 0, 8 3, 0 6" class="arrow-denied"/>
+              </marker>
+              <marker id="arrow-denied-start" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto-start-reverse">
+                <polygon points="0 0, 8 3, 0 6" class="arrow-denied"/>
+              </marker>
+            </defs>
+          </svg>
+
+          <!-- Nodes are generated by JS -->
+          <div id="nodes-container"></div>
+
+        </div>
+
+    </div>
+    <div class="right-top">
+      <div class="panel" id="panel-status">
+        <div class="status-bar">
+          <div class="connection-status">
+            <span class="status-label">Dashboard Status:</span>
+            <span class="connection-label connecting" id="connection-label">CONNECTING</span>
+          </div>
+          <button class="btn-reset" id="btn-reset-demo" title="Reset demo to initial state">Reset Demo</button>
+        </div>
+      </div>
+      <div class="panel" id="panel-registry">
+        <div class="panel-header">Authority Registry</div>
+        <div class="panel-content">
+          <div class="empty-state">Loading…</div>
+        </div>
+      </div>
+    </div>
+    <div class="panel" id="panel-audit">
+      <div class="panel-header">Audit Log</div>
+      <div class="panel-content"></div>
+    </div>
+    <div class="panel" id="panel-gateway">
+      <div class="panel-header">Gateway Decisions</div>
+      <div class="panel-content"></div>
+    </div>
+  </div>
+
+<script src="/topology.js"></script>
+<script src="/registry-panel.js"></script>
+<script>
+  // ============================================================
+  // Shorthand aliases for frequently used topology API
+  // ============================================================
+  const esc = Topology.esc;
+
+  // ============================================================
+  // Dashboard state
+  // ============================================================
+  const gatewayDecisions = [];
+  const auditEntries = [];
+
+  // ============================================================
+  // Gateway Decisions rendering
+  // ============================================================
+  function appendGatewayDecision(d) {
+    const container = document.querySelector('#panel-gateway .panel-content');
+    const isDenied = d.result === 'denied';
+
+    let html =
+      '<div class="gw-row-top">' +
+        '<span class="gw-time">' + esc(formatTimestamp(d.timestamp)) + '</span>' +
+        '<span class="gw-agent">' + esc(d.agent || '') + '</span>' +
+        '<span class="gw-host">' + esc(d.host || '') + '</span>' +
+        '<span class="gw-badge gw-badge-' + (isDenied ? 'denied' : 'allowed') + '">' + (isDenied ? 'DENIED' : 'ALLOWED') + '</span>' +
+      '</div>';
+
+    if (isDenied && d.reason) {
+      html += '<div class="gw-reason">' + esc(d.reason) + '</div>';
+    }
+
+    const row = document.createElement('div');
+    row.className = 'gw-row' + (isDenied ? ' gw-denied' : '');
+    row.innerHTML = html;
+    container.appendChild(row);
+
+    // Auto-scroll
+    container.scrollTop = container.scrollHeight;
+  }
+
+  // ============================================================
+  // Audit Log rendering
+  // ============================================================
+  function appendAuditEntry(entry) {
+    const container = document.querySelector('#panel-audit .panel-content');
+
+    const source = entry.source || '';
+    const sourceClass = 'audit-source-' + source;
+    const ts = formatTimestamp(entry.timestamp);
+    const denied = entry.event_type === 'request.denied';
+
+    const html =
+      '<span class="audit-ts">' + esc(ts) + '</span>' +
+      '<span class="audit-source ' + sourceClass + '">' + esc(source) + '</span>' +
+      '<span class="audit-event">' + esc(entry.event_type || '') + '</span>' +
+      '<span class="audit-summary">' + esc(entry.summary || buildSummary(entry)) + '</span>';
+
+    const row = document.createElement('div');
+    row.className = 'audit-row' + (denied ? ' audit-denied' : '');
+    row.innerHTML = html;
+    container.appendChild(row);
+
+    // Auto-scroll
+    container.scrollTop = container.scrollHeight;
+  }
+
+  function formatTimestamp(ts) {
+    if (!ts) return '';
+    try {
+      const d = new Date(ts);
+      if (isNaN(d.getTime())) return ts;
+      return d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }) +
+        '.' + String(d.getMilliseconds()).padStart(3, '0');
+    } catch {
+      return ts;
+    }
+  }
+
+  function buildSummary(event) {
+    const attrs = event.attributes || {};
+    const eventType = event.event_type || '';
+
+    switch (eventType) {
+      case 'agent.created':
+        return 'Agent ' + (attrs['agent.id'] || '') + ' provisioned';
+      case 'agent.terminated':
+        return 'Agent ' + (attrs['agent.id'] || '') + ' terminated';
+      case 'request.allowed':
+        return (attrs['http.host'] || '') + ' -- allowed';
+      case 'request.denied':
+        return (attrs['http.host'] || '') + ' -- denied' + (attrs['denial.reason'] ? ': ' + attrs['denial.reason'] : '');
+      default:
+        if (attrs['agent.id']) return eventType + ' for ' + attrs['agent.id'];
+        return eventType;
+    }
+  }
+
+  // ============================================================
+  // Event processing
+  // ============================================================
+  function isInternalEvent(event) {
+    const eventType = event.event_type || '';
+    if (eventType === 'health_check' || eventType === 'polling') return true;
+    return false;
+  }
+
+  function clearAllDashboardState() {
+    Topology.agentRuntimes.forEach((info) => {
+      const el = document.getElementById(info.id);
+      if (el) el.remove();
+    });
+    Topology.agentRuntimes.clear();
+    gatewayDecisions.length = 0;
+    auditEntries.length = 0;
+    Topology.activeEdges.clear();
+    Topology.deniedEdges.clear();
+    Topology.agentNodeCounter = 0;
+    document.querySelector('#panel-gateway .panel-content').innerHTML = '';
+    document.querySelector('#panel-audit .panel-content').innerHTML = '';
+    Topology.reLayout();
+  }
+
+  function processEvent(event) {
+    if (isInternalEvent(event)) return;
+
+    const eventType = event.event_type || '';
+    const attrs = event.attributes || {};
+    const agentId = attrs['agent.id'] || '';
+
+    // Demo reset — clear all local state
+    if (eventType === 'demo.reset') {
+      clearAllDashboardState();
+      return;
+    }
+
+    // User lifecycle. Event names are speculative until the backend
+    // settles its vocabulary; the handler shape stays the same.
+    if (eventType === 'user.created') {
+      const userId = attrs['user.id'] || '';
+      if (userId) Topology.addUserNode(userId);
+    }
+    if (eventType === 'user.deleted') {
+      const userId = attrs['user.id'] || '';
+      if (userId) Topology.removeUserNode(userId);
+    }
+
+    // User actions — light up the user→platform edge.
+    if (eventType === 'agent.requested' || eventType === 'prompt.sent' || eventType === 'permission.change_requested' || eventType === 'termination.requested') {
+      const userId = attrs['user.id'] || '';
+      if (userId) {
+        Topology.highlightEdge(userId, Topology.EDGE_HIGHLIGHT_MS);
+      }
+    }
+
+    // Agent lifecycle. Light up the platform→agent edge: the platform is
+    // either spawning or terminating the runtime via the supervisor.
+    if (eventType === 'agent.created') {
+      Topology.addAgentRuntimeNode(agentId);
+      if (agentId) Topology.highlightEdge('platform-' + agentId, Topology.EDGE_HIGHLIGHT_MS);
+    }
+
+    if (eventType === 'agent.terminated') {
+      if (agentId) Topology.highlightEdge('platform-' + agentId, Topology.EDGE_HIGHLIGHT_MS);
+      Topology.removeAgentRuntimeNode(agentId);
+    }
+
+    // Prompt delivered: platform exec'd into the agent via the supervisor.
+    if (eventType === 'agent.prompted') {
+      if (agentId) Topology.highlightEdge('platform-' + agentId, Topology.EDGE_HIGHLIGHT_MS);
+    }
+
+    // Gateway decisions
+    if (eventType === 'auth.allowed' || eventType === 'request.allowed' || eventType === 'request.denied' || eventType === 'permission.checked') {
+      const decision = {
+        agent: agentId,
+        host: attrs['http.host'] || '',
+        result: eventType === 'request.denied' ? 'denied' : 'allowed',
+        reason: attrs['denial.reason'] || '',
+        timestamp: event.timestamp || new Date().toISOString()
+      };
+      gatewayDecisions.push(decision);
+      appendGatewayDecision(decision);
+
+      // Ensure agent runtime node exists and highlight its edge to the gateway.
+      if (agentId) {
+        Topology.addAgentRuntimeNode(agentId);
+        Topology.highlightEdge(agentId, Topology.EDGE_HIGHLIGHT_MS);
+      }
+
+      // Gateway checks the registry on every request.
+      Topology.highlightEdge('gateway-authority-registry', Topology.EDGE_HIGHLIGHT_MS);
+
+      // Highlight target service edge — red if denied, blue if allowed.
+      const hl = decision.result === 'denied' ? Topology.highlightEdgeDenied : Topology.highlightEdge;
+      const host = attrs['http.host'] || '';
+      if (host.includes('docstore')) hl('docstore', Topology.EDGE_HIGHLIGHT_MS);
+      if (host.includes('messaging')) hl('messaging', Topology.EDGE_HIGHLIGHT_MS);
+      if (host === 'api.anthropic.com' || host === 'api.anthropic.com:443') hl('anthropic', Topology.EDGE_HIGHLIGHT_MS);
+    }
+
+    // Audit log - show all non-internal events
+    auditEntries.push(event);
+    appendAuditEntry(event);
+  }
+
+  // ============================================================
+  // WebSocket connection
+  // ============================================================
+  let ws = null;
+  let reconnectTimeout = null;
+
+  function setConnectionStatus(status) {
+    const label = document.getElementById('connection-label');
+    label.className = 'connection-label ' + status;
+    label.textContent = status.toUpperCase();
+  }
+
+  function connect() {
+    setConnectionStatus('connecting');
+
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(proto + '//' + location.host + '/ws');
+
+    ws.onopen = () => {
+      setConnectionStatus('connected');
+    };
+
+    ws.onclose = () => {
+      setConnectionStatus('disconnected');
+      ws = null;
+      reconnectTimeout = setTimeout(connect, 2000);
+    };
+
+    ws.onerror = () => {
+      if (ws) ws.close();
+    };
+
+    ws.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'history') {
+          // Process historical events
+          if (msg.events && Array.isArray(msg.events)) {
+            for (const event of msg.events) {
+              processEvent(event);
+            }
+          }
+        } else {
+          // Individual event
+          processEvent(msg);
+        }
+      } catch (err) {
+        console.error('Failed to parse WebSocket message:', err);
+      }
+    };
+  }
+
+  // ============================================================
+  // Authority Registry panel — poll /api/registry every 2s
+  // ============================================================
+  const REGISTRY_POLL_MS = 2000;
+  let registryTimer = null;
+
+  function renderRegistry(snapshot, state) {
+    const container = document.querySelector('#panel-registry .panel-content');
+    if (!container) return;
+    container.innerHTML = renderRegistryHtml(snapshot, state);
+  }
+
+  async function pollRegistry() {
+    try {
+      const res = await fetch('/api/registry');
+      if (!res.ok) throw new Error('status ' + res.status);
+      const snap = await res.json();
+      renderRegistry(snap, {});
+    } catch (_err) {
+      renderRegistry(null, { error: 'Registry unavailable' });
+    }
+  }
+
+  function startRegistryPolling() {
+    if (registryTimer) return;
+    pollRegistry();
+    registryTimer = setInterval(pollRegistry, REGISTRY_POLL_MS);
+  }
+
+  function stopRegistryPolling() {
+    if (registryTimer) {
+      clearInterval(registryTimer);
+      registryTimer = null;
+    }
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stopRegistryPolling();
+    else startRegistryPolling();
+  });
+
+  // ============================================================
+  // Reset button
+  // ============================================================
+  document.getElementById('btn-reset-demo').addEventListener('click', async () => {
+    const btn = document.getElementById('btn-reset-demo');
+    btn.disabled = true;
+    btn.textContent = 'Resetting...';
+
+    try {
+      const res = await fetch('/api/reset', { method: 'POST' });
+      if (res.ok) {
+        clearAllDashboardState();
+      }
+    } catch (err) {
+      console.error('Reset failed:', err);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Reset Demo';
+    }
+  });
+
+  // ============================================================
+  // Init
+  // ============================================================
+  window.addEventListener('DOMContentLoaded', () => {
+    Topology.createStaticNodes();
+    Topology.applySizes();
+    Topology.computeLayout();
+    Topology.drawAllEdges();
+    Topology.fitTopologyToPanel();
+    connect();
+    startRegistryPolling();
+
+    // Fetch registered users from the registry and add them to the topology.
+    // The exact endpoint and response shape are TBD pending the new backend;
+    // for now this calls /api/users and expects an array of {id} objects.
+    fetchUsers();
+
+    function fetchUsers() {
+      fetch('/api/users')
+        .then(r => r.ok ? r.json() : [])
+        .then(items => {
+          if (!Array.isArray(items)) return;
+          for (const u of items) {
+            if (u && u.id) Topology.addUserNode(u.id);
+          }
+        })
+        .catch(() => {
+          // Registry not ready yet — retry once after a delay.
+          setTimeout(fetchUsers, 3000);
+        });
+    }
+  });
+
+  window.addEventListener('resize', Topology.fitTopologyToPanel);
+</script>
+
+</body>
+</html>

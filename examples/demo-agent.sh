@@ -13,6 +13,7 @@ DEFAULT_SWTPM_PORT="${AGENT_GATEWAY_DEMO_SWTPM_PORT:-2321}"
 TPM2_PKCS11_STORE="${TPM2_PKCS11_STORE:-$HOME/.tpm2_pkcs11}"
 TOKEN_LABEL="${AGENT_GATEWAY_TPM_TOKEN_LABEL:-agent-gateway}"
 USER_PIN="${AGENT_GATEWAY_TPM_USER_PIN:-}"
+DEFAULT_DASHBOARD_URL="${AGENT_GATEWAY_DEMO_DASHBOARD_URL:-http://localhost:3000}"
 export TPM2_PKCS11_STORE
 
 usage() {
@@ -243,6 +244,39 @@ cmd_grant() {
   grant_permissions
 }
 
+emit_prompt_events() {
+  local principal="$1" identity="$2"
+  local now_ns
+  now_ns="$(date +%s%N)"
+  local dashboard_url="${AGENT_GATEWAY_DEMO_DASHBOARD_URL:-$DEFAULT_DASHBOARD_URL}"
+  curl -sf --max-time 2 -X POST "$dashboard_url/v1/logs" \
+    -H 'Content-Type: application/json' \
+    -d "{
+      \"resourceLogs\": [{
+        \"resource\": {\"attributes\": [{\"key\": \"service.name\", \"value\": {\"stringValue\": \"agent-platform\"}}]},
+        \"scopeLogs\": [{
+          \"logRecords\": [
+            {
+              \"timeUnixNano\": \"$now_ns\",
+              \"eventName\": \"agent.requested\",
+              \"attributes\": [
+                {\"key\": \"user.id\",  \"value\": {\"stringValue\": \"$principal\"}},
+                {\"key\": \"agent.id\", \"value\": {\"stringValue\": \"$identity\"}}
+              ]
+            },
+            {
+              \"timeUnixNano\": \"$now_ns\",
+              \"eventName\": \"agent.prompted\",
+              \"attributes\": [
+                {\"key\": \"agent.id\", \"value\": {\"stringValue\": \"$identity\"}}
+              ]
+            }
+          ]
+        }]
+      }]
+    }" >/dev/null || true
+}
+
 cmd_prompt() {
   [[ $# -ge 1 ]] || { echo "error: prompt requires AGENT_HANDLE" >&2; usage; exit 2; }
   HANDLE="$1"
@@ -260,6 +294,7 @@ cmd_prompt() {
   done
 
   [[ -n "$PROMPT" ]] || { echo "error: prompt requires --prompt" >&2; exit 2; }
+  emit_prompt_events "$PRINCIPAL" "$IDENTITY"
   ensure_sidecar "$STATE_DIR_CURRENT"
   "$SCRIPT_DIR/connect.sh" prompt \
     --state-dir "$STATE_DIR_CURRENT" \

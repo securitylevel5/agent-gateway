@@ -1,0 +1,37 @@
+# OpenTelemetry Collector config used by the dashboard's docker-compose
+# service. It bridges the gateway (which emits OTLP gRPC) and the dashboard
+# (which accepts OTLP HTTP/JSON on /v1/traces).
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  batch:
+    # Small flush window so the dashboard sees events within ~1s of the
+    # gateway emitting them.
+    timeout: 1s
+    send_batch_size: 50
+
+exporters:
+  otlphttp/dashboard:
+    # The collector runs in docker; the dashboard runs on the host. Reach
+    # it via the dockerized host alias. The exporter appends /v1/traces
+    # automatically, so this matches POST http://<host>:3000/v1/traces.
+    endpoint: http://host.docker.internal:3000
+    encoding: json
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/dashboard]
+
+  telemetry:
+    logs:
+      level: info

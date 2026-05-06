@@ -1,0 +1,104 @@
+/* Shared theme for the agent gateway demo UI. */
+
+* { box-sizing: border-box; }
+
+:root {
+  --color-bg:          #0a0e17;
+  --color-text:        #c9d1d9;
+  --color-muted:       #8b949e;
+  --color-border:      rgba(139, 148, 158, 0.2);
+  --color-border-faint: rgba(139, 148, 158, 0.06);
+  --color-edge:        #30363d;
+
+  --color-blue:        #58a6ff;
+  --color-purple:      #bc8cff;
+  --color-green:       #3fb950;
+  --color-orange:      #f0883e;
+  --color-red:         #f85149;
+  --color-yellow:      #d29922;
+  --color-cyan:        #39d4e0;
+  --color-method:      #d2a8ff;
+
+  --color-terminal-bg: #0d1117;
+  --color-terminal-cursor: #58a6ff;
+  --color-terminal-selection: rgba(88, 166, 255, 0.3);
+  --color-bright-white: #f0f6fc;
+  --color-panel-bg:    rgba(139, 148, 158, 0.03);
+  --color-panel-header: rgba(88, 166, 255, 0.04);
+  --color-panel-header-border: rgba(88, 166, 255, 0.15);
+
+  --font-sans:  'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono:  'SF Mono', 'Fira Code', 'Consolas', monospace;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  overflow: hidden;
+}
+
+/* Shared panel styles */
+.panel {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-panel-bg);
+  overflow: hidden;
+}
+
+.panel-header {
+  padding: 8px 16px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  flex-shrink: 0;
+  color: var(--color-blue);
+  border-bottom: 1px solid var(--color-panel-header-border);
+  background: var(--color-panel-header);
+}
+
+.panel-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+/* Shared grid base — apps override grid-template-columns/rows */
+.grid {
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+  width: 100%;
+  height: 100vh;
+}
+
+/* Shared connection status indicator */
+.connection-status {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-muted);
+}
+
+.connection-label {
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-muted);
+}
+
+.connection-label.connected    { color: var(--color-green); }
+.connection-label.connecting   { color: var(--color-yellow); animation: pulse-text 1s ease-in-out infinite; }
+.connection-label.disconnected { color: var(--color-red); }
+
+@keyframes pulse-text {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.3; }
+}
