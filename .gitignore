@@ -1,3 +1,7 @@
 /target
 .cursor/
 __pycache__/
+/agent-gateway-dashboard/
+.run/
+/certs/
+/config.toml

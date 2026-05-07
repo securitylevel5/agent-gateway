@@ -206,19 +206,30 @@ run_prompt() {
     PROXY_URL="$(<"$proxy_file")"
     WORK_DIR="${WORK_DIR:-$STATE_DIR/work}"
     mkdir -p "$WORK_DIR"
-    CLAUDE_CURL_PERMISSIONS=(
+    CLAUDE_ARGS=(
         --allowedTools "Bash(curl *)"
+        --system-prompt "You have access to two internal services via HTTPS:
+
+- docstore (https://docstore) - document storage
+  - GET /health - health check
+  - GET /documents - list available documents
+
+- messaging (https://messaging) - internal messaging (read-only)
+  - GET /health - health check
+  - GET /messages - list recent messages
+
+Use the Bash tool with curl to interact with these services."
     )
 
     if [[ -f "$STATE_DIR/claude_started" ]]; then
         (
             cd "$WORK_DIR"
-            HTTP_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL" CURL_CA_BUNDLE="${CURL_CA_BUNDLE:-}" SSL_CERT_FILE="${SSL_CERT_FILE:-}" claude "${CLAUDE_CURL_PERMISSIONS[@]}" -c -p "$PROMPT"
+            HTTP_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL" CURL_CA_BUNDLE="${CURL_CA_BUNDLE:-}" SSL_CERT_FILE="${SSL_CERT_FILE:-}" claude "${CLAUDE_ARGS[@]}" -c -p "$PROMPT"
         )
     else
         (
             cd "$WORK_DIR"
-            HTTP_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL" CURL_CA_BUNDLE="${CURL_CA_BUNDLE:-}" SSL_CERT_FILE="${SSL_CERT_FILE:-}" claude "${CLAUDE_CURL_PERMISSIONS[@]}" -p "$PROMPT"
+            HTTP_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL" CURL_CA_BUNDLE="${CURL_CA_BUNDLE:-}" SSL_CERT_FILE="${SSL_CERT_FILE:-}" claude "${CLAUDE_ARGS[@]}" -p "$PROMPT"
         )
         : > "$STATE_DIR/claude_started"
     fi

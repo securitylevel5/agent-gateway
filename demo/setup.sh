@@ -20,7 +20,13 @@ GATEWAY="${AGENT_GATEWAY_DEMO_GATEWAY:-127.0.0.1:8443}"
 GATEWAY_CA="${AGENT_GATEWAY_DEMO_GATEWAY_CA:-$REPO_ROOT/certs/server-ca.pem}"
 MOCK_CA="${AGENT_GATEWAY_DEMO_MOCK_CA:-$REPO_ROOT/certs/mock-ca.pem}"
 SIDECAR_BIN="$REPO_ROOT/target/debug/agent_gateway_sidecar"
-VERIFY_TIMEOUT_SECONDS="${AGENT_GATEWAY_DEMO_VERIFY_TIMEOUT_SECONDS:-120}"
+RESET_SERVER_PORT="${AGENT_GATEWAY_DEMO_RESET_SERVER_PORT:-8765}"
+PIDS_DIR="$REPO_ROOT/.run"
+
+RESET_MODE=false
+if [[ "${1:-}" == "--reset" ]]; then
+  RESET_MODE=true
+fi
 
 export COMPOSE_PROJECT_NAME
 
@@ -95,43 +101,106 @@ state_dir() {
   printf '%s/%s\n' "$STATE_ROOT" "$HANDLE"
 }
 
-print_verification_diagnostics() {
-  local sidecar_log
-  sidecar_log="$(state_dir)/sidecar.log"
-
-  echo "Check the gateway, sidecar, and mock service logs before retrying." >&2
-  echo "Sidecar log: $sidecar_log" >&2
-  if [[ -f "$sidecar_log" ]]; then
-    echo >&2
-    echo "Recent sidecar log lines:" >&2
-    tail -n 80 "$sidecar_log" >&2 || true
+clear_enrollment() {
+  echo "==> Stopping sidecar"
+  local sidecar_pid_file
+  sidecar_pid_file="$(state_dir)/sidecar_pid"
+  if [[ -f "$sidecar_pid_file" ]]; then
+    local pid
+    pid="$(<"$sidecar_pid_file")"
+    kill "$pid" 2>/dev/null || true
   fi
+
+  echo "==> Clearing agent state and TPM store"
+  rm -rf "$STATE_ROOT" "$TPM2_PKCS11_STORE"
+
+  echo "==> Clearing enrollment records from database"
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
+DELETE FROM permission_registry;
+DELETE FROM principal_key_permissions;
+DELETE FROM principal_signing_keys;
+SQL
 }
 
-demo_env=(
-  "AGENT_GATEWAY_DATABASE_URL=$DATABASE_URL"
-  "AGENT_GATEWAY_DEMO_GATEWAY=$GATEWAY"
-  "AGENT_GATEWAY_DEMO_GATEWAY_CA=$GATEWAY_CA"
-  "AGENT_GATEWAY_DEMO_MOCK_CA=$MOCK_CA"
-  "AGENT_GATEWAY_DEMO_SIDECAR_BIN=$SIDECAR_BIN"
-  "AGENT_GATEWAY_DEMO_STATE_DIR=$STATE_ROOT"
-  "AGENT_GATEWAY_TPM_USER_PIN=$USER_PIN"
-  "AGENT_GATEWAY_TPM_SO_PIN=$SO_PIN"
-  "AGENT_GATEWAY_RESET_TPM_STORE=false"
-  "CLAUDE_CODE_PROXY_RESOLVES_HOSTS=1"
-  "CURL_CA_BUNDLE=$MOCK_CA"
-  "NODE_EXTRA_CA_CERTS=$MOCK_CA"
-  "SSL_CERT_FILE=$MOCK_CA"
-  "TPM2_PKCS11_STORE=$TPM2_PKCS11_STORE"
-)
+enroll() {
+  demo_env=(
+    "AGENT_GATEWAY_DATABASE_URL=$DATABASE_URL"
+    "AGENT_GATEWAY_DEMO_GATEWAY=$GATEWAY"
+    "AGENT_GATEWAY_DEMO_GATEWAY_CA=$GATEWAY_CA"
+    "AGENT_GATEWAY_DEMO_MOCK_CA=$MOCK_CA"
+    "AGENT_GATEWAY_DEMO_SIDECAR_BIN=$SIDECAR_BIN"
+    "AGENT_GATEWAY_DEMO_STATE_DIR=$STATE_ROOT"
+    "AGENT_GATEWAY_TPM_USER_PIN=$USER_PIN"
+    "AGENT_GATEWAY_TPM_SO_PIN=$SO_PIN"
+    "AGENT_GATEWAY_RESET_TPM_STORE=false"
+    "CLAUDE_CODE_PROXY_RESOLVES_HOSTS=1"
+    "CURL_CA_BUNDLE=$MOCK_CA"
+    "NODE_EXTRA_CA_CERTS=$MOCK_CA"
+    "SSL_CERT_FILE=$MOCK_CA"
+    "TPM2_PKCS11_STORE=$TPM2_PKCS11_STORE"
+    "AGENT_GATEWAY_DEMO_DASHBOARD_URL=http://localhost:3000"
+  )
+
+  echo "==> Registering demo principal $PRINCIPAL"
+  env "${demo_env[@]}" "$REPO_ROOT/registry-cli/register-principal-key.sh" "$PRINCIPAL"
+
+  echo "==> Granting demo scopes"
+  env "${demo_env[@]}" "$REPO_ROOT/registry-cli/grant-principal-scope.sh" "$PRINCIPAL" docstore messaging api.anthropic.com
+
+  echo "==> Creating demo agent $HANDLE"
+  env "${demo_env[@]}" "$SCRIPT_DIR/demo-agent.sh" create \
+    --identity "$IDENTITY" \
+    --handle "$HANDLE" \
+    --grant docstore \
+    --grant api.anthropic.com >/dev/null
+}
+
+start_reset_server() {
+  mkdir -p "$PIDS_DIR"
+
+  # Kill any existing reset server
+  if [[ -f "$PIDS_DIR/reset-server.pid" ]]; then
+    kill "$(<"$PIDS_DIR/reset-server.pid")" 2>/dev/null || true
+    rm -f "$PIDS_DIR/reset-server.pid"
+  fi
+
+  local setup_script="$SCRIPT_DIR/setup.sh"
+  nohup node -e "
+    const http = require('http');
+    const { spawn } = require('child_process');
+    http.createServer((req, res) => {
+      if (req.method !== 'POST' || new URL(req.url, 'http://x').pathname !== '/reset') {
+        res.writeHead(404); res.end(); return;
+      }
+      const proc = spawn('bash', ['$setup_script', '--reset'], { stdio: 'inherit' });
+      proc.on('exit', code => {
+        res.writeHead(code === 0 ? 200 : 500, {'Content-Type': 'application/json'});
+        res.end(JSON.stringify({ ok: code === 0 }));
+      });
+    }).listen($RESET_SERVER_PORT, '0.0.0.0', () => {
+      process.stdout.write('Reset server listening on $RESET_SERVER_PORT\n');
+    });
+  " > "$PIDS_DIR/reset-server.log" 2>&1 &
+  echo $! > "$PIDS_DIR/reset-server.pid"
+  echo "==> Reset server started on port $RESET_SERVER_PORT"
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 select_compose
 require_cmd cargo
 require_cmd openssl
 require_cmd psql
-require_cmd timeout
+require_cmd node
 
 cd "$REPO_ROOT"
+
+if [[ "$RESET_MODE" == "true" ]]; then
+  clear_enrollment
+  enroll
+  echo "Reset complete."
+  exit 0
+fi
 
 echo "==> Generating demo TLS certificates"
 "$SCRIPT_DIR/generate-server-certs.sh"
@@ -140,6 +209,9 @@ if [[ ! -f "$REPO_ROOT/config.toml" ]]; then
   echo "==> Creating config.toml from config.example.toml"
   cp "$REPO_ROOT/config.example.toml" "$REPO_ROOT/config.toml"
 fi
+# Ensure the gateway (running in Docker) sends OTLP to the collector service name,
+# not localhost (which would be the gateway container itself).
+sed -i 's|otlp_endpoint = "http://localhost:4317"|otlp_endpoint = "http://otel-collector:4317"|' "$REPO_ROOT/config.toml"
 
 echo "==> Building local sidecar"
 cargo build -p agent_gateway_sidecar
@@ -152,48 +224,17 @@ compose up -d --force-recreate postgres mock-services
 wait_for_postgres
 apply_migrations
 
-echo "==> Starting gateway"
-compose up -d --force-recreate gateway
+echo "==> Starting gateway, otel-collector, and dashboard"
+compose up -d --force-recreate gateway otel-collector dashboard
 
-echo "==> Registering demo principal $PRINCIPAL"
-env "${demo_env[@]}" "$REPO_ROOT/registry-cli/register-principal-key.sh" "$PRINCIPAL"
-
-echo "==> Granting demo scopes"
-env "${demo_env[@]}" "$REPO_ROOT/registry-cli/grant-principal-scope.sh" "$PRINCIPAL" docstore messaging api.anthropic.com
-
-echo "==> Creating demo agent $HANDLE"
-env "${demo_env[@]}" "$SCRIPT_DIR/demo-agent.sh" create \
-  --identity "$IDENTITY" \
-  --handle "$HANDLE" \
-  --grant docstore \
-  --grant api.anthropic.com \
-  --grant messaging >/dev/null
-
-echo "==> Verifying Claude Code HTTP requests through the gateway"
-if ! timeout "$VERIFY_TIMEOUT_SECONDS" env "${demo_env[@]}" "$SCRIPT_DIR/demo-agent.sh" prompt "$HANDLE" --prompt \
-  "Use the Bash tool to run exactly this command: curl -sS https://docstore/health
-Return only the raw response body."; then
-  cat >&2 <<EOF
-error: Claude Code could not fetch https://docstore/health through the demo gateway.
-
-Expected environment:
-  HTTPS_PROXY=http://127.0.0.1:3128
-  CURL_CA_BUNDLE=$MOCK_CA
-  NODE_EXTRA_CA_CERTS=$MOCK_CA
-  SSL_CERT_FILE=$MOCK_CA
-  CLAUDE_CODE_PROXY_RESOLVES_HOSTS=1
-  AGENT_GATEWAY_DEMO_SIDECAR_BIN=$SIDECAR_BIN
-
-EOF
-  print_verification_diagnostics
-  exit 1
-fi
-
-rm -f "$(state_dir)/claude_started"
+enroll
+start_reset_server
 
 cat <<EOF
 
 Demo is ready.
+
+Dashboard: http://localhost:3000
 
 Mock service URLs available through the gateway:
   https://docstore/health

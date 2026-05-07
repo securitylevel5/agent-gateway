@@ -44,5 +44,31 @@ services:
       - postgres
       - mock-services
 
+  otel-collector:
+    image: otel/opentelemetry-collector:0.111.0
+    command: ["--config=/etc/otel-collector.yaml"]
+    volumes:
+      - ./agent-gateway-dashboard/otel-collector.yaml:/etc/otel-collector.yaml:ro
+    ports:
+      - "4317:4317"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      dashboard:
+        condition: service_started
+
+  dashboard:
+    build:
+      context: ./agent-gateway-dashboard
+    ports:
+      - "3000:3000"
+    environment:
+      AGENT_GATEWAY_DATABASE_URL: postgres://agent_gateway_admin:agent_gateway_dev@postgres:5432/agent_gateway
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   agent-gateway-demo-postgres:
