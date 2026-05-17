@@ -89,7 +89,7 @@ The authorization registry has three main tables:
 The signed bytes are the following UTF-8 text, with fields in this exact order and timestamps formatted as UTC RFC 3339 with six fractional digits:
 
 ```text
-agent-gateway-permission-v1
+agent-gateway-permission-v2
 permission_id=perm-1
 signing_key_id=org-alice
 subject_identity=agent-alpha
@@ -97,9 +97,22 @@ subject_public_key_spki_der=3059301306072a8648ce3d020106082a8648ce3d030107034200
 destination=api.example.com:443
 not_before=2026-05-01T00:00:00.000000Z
 not_after=2026-06-01T00:00:00.000000Z
+capacity_bytes=10485760
+refill_bytes_per_sec=1048576
 ```
 
 Destination strings are normalized with the same rules used for CONNECT requests: hostnames are lowercased, omitted ports default to `443`, and IPv6 destinations use bracketed `host:port` form.
+
+`capacity_bytes` and `refill_bytes_per_sec` define a per-permission token bucket. `capacity_bytes` is the maximum burst the agent can emit in a single window; `refill_bytes_per_sec` is the sustained throughput. The bucket is enforced at CONNECT time (refuse with `429` if empty) and continuously during the tunnel (the upstream-side write path is metered, and a write that would drain the bucket terminates the tunnel cleanly). Because the limits are part of the signed canonical bytes, a compromised gateway with read-write access to `permission_registry` still cannot raise them without the principal's signing key.
+
+### In-flight propagation of expiry and revocation
+
+The rate-limit bucket also acts as the kill switch for two other reasons an in-flight tunnel might need to end early:
+
+- **Permission expiry.** The bucket carries the signed `not_after` and treats itself as dead when `now() >= not_after`. The next write through the metered upstream returns `io::Error`, the tunnel closes, and the next CONNECT for the same permission is refused by the policy engine in the usual way.
+- **Explicit revocation.** A background task in the gateway polls `permission_registry` every 30 seconds for rows whose `revoked_at` has been set. For each such row, it marks the corresponding in-process bucket as revoked. Active tunnels using that bucket then fail their next write through the same path. The 30-second worst-case latency is bounded: throughout the window the bucket continues to enforce the signed rate limit, so the agent cannot exfiltrate faster than `capacity_bytes + refill_bytes_per_sec × 30s` after a revocation is issued.
+
+These two paths use the same `MeteredStream` error code path as the rate-limit deny; there is no special-cased control flow per termination reason.
 
 ## Client requirements
 
@@ -126,6 +139,7 @@ Clients must:
 | `400` | Malformed request (missing/invalid authority) |
 | `403` | Policy denied the connection |
 | `405` | Non-CONNECT method used |
+| `429` | Rate limit exceeded (the signed `capacity_bytes` for the matching permission has been depleted); response includes a `Retry-After` header in seconds when the bucket has a non-zero refill rate |
 | `502` | Could not reach the destination |
 
 ### Client certificate extension
@@ -163,6 +177,10 @@ cargo install sqlx-cli --version 0.8.6 --locked --no-default-features --features
 SQLX_OFFLINE=false DATABASE_URL="$TEST_DATABASE_URL" cargo sqlx database setup
 SQLX_OFFLINE=false DATABASE_URL="$TEST_DATABASE_URL" cargo sqlx prepare -- --all-targets --locked
 ```
+
+## Demo repository: registry-cli must be updated to sign v2
+
+This gateway expects every permission row to be signed in the v2 canonical-bytes format (with `capacity_bytes` and `refill_bytes_per_sec`). The sister demo repository `agent-gateway-demo` ships a `registry-cli/agent-permissions.sh` that currently signs v1. To use this gateway with that demo end-to-end, the script needs a small parallel update: two extra lines in the canonical-bytes here-doc and two corresponding `--set=` flags on the `psql` invocation that inserts the row, plus two new CLI parameters surfacing the values. The diff is small and mechanical; this gateway repository's PR does not modify the demo repo.
 
 ## License
 
