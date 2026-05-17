@@ -4,7 +4,7 @@ use anyhow::Context;
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgPool;
 
-const EXPECTED_SCHEMA_VERSION: i32 = 1;
+const EXPECTED_SCHEMA_VERSION: i32 = 2;
 
 #[derive(Clone)]
 pub(crate) struct RegistryStore {
@@ -21,6 +21,8 @@ pub(crate) struct CandidatePermission {
     pub(crate) signing_key_id: String,
     pub(crate) permission_not_before: DateTime<Utc>,
     pub(crate) permission_not_after: DateTime<Utc>,
+    pub(crate) capacity_bytes: i64,
+    pub(crate) refill_bytes_per_sec: i64,
     pub(crate) signature: Vec<u8>,
     pub(crate) signer_algorithm: String,
     pub(crate) signer_public_key_spki_der: Vec<u8>,
@@ -70,6 +72,8 @@ impl RegistryStore {
                 p.signing_key_id,
                 p.not_before AS "permission_not_before!",
                 p.not_after AS "permission_not_after!",
+                p.capacity_bytes,
+                p.refill_bytes_per_sec,
                 p.signature,
                 s.algorithm AS "signer_algorithm!",
                 s.public_key_spki_der AS "signer_public_key_spki_der!",

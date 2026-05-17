@@ -85,7 +85,9 @@ impl ProxyService {
             };
 
             let source_identity = match self.policy_engine.evaluate(&ctx).await {
-                PolicyDecision::Allow { source_identity } => {
+                PolicyDecision::Allow {
+                    source_identity, ..
+                } => {
                     info!(
                         source_identity = %source_identity,
                         source_peer_addr = %self.source_peer_addr,

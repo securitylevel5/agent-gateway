@@ -22,11 +22,24 @@ pub struct RequestContext {
 pub enum PolicyDecision {
     Allow {
         source_identity: String,
+        permission: AllowedPermission,
     },
     Deny {
         source_identity: Option<String>,
         reason: String,
     },
+}
+
+/// Fields from the matched permission row that the proxy needs to set up the
+/// per-permission rate-limit bucket. `capacity_bytes` and `refill_bytes_per_sec`
+/// come from the signed v2 canonical bytes (so they cannot be raised without
+/// the principal's signing key); `not_after` is the bucket's expiry deadline.
+#[derive(Clone)]
+pub struct AllowedPermission {
+    pub permission_id: String,
+    pub capacity_bytes: u64,
+    pub refill_bytes_per_sec: u64,
+    pub not_after: chrono::DateTime<chrono::Utc>,
 }
 
 #[async_trait]
@@ -193,7 +206,23 @@ impl PolicyEngine for PostgresPolicyEngine {
         let mut last_denial = None;
         for candidate in candidates {
             match self.evaluate_candidate(&candidate, &normalized_dest).await {
-                Ok(()) => return PolicyDecision::Allow { source_identity },
+                Ok(()) => {
+                    // capacity_bytes and refill_bytes_per_sec are i64 in the
+                    // database row but the CHECK (>= 0) constraint in
+                    // migration 0002 guarantees they are non-negative, so the
+                    // cast to u64 is safe.
+                    #[allow(clippy::cast_sign_loss)]
+                    let permission = AllowedPermission {
+                        permission_id: candidate.permission_id.clone(),
+                        capacity_bytes: candidate.capacity_bytes as u64,
+                        refill_bytes_per_sec: candidate.refill_bytes_per_sec as u64,
+                        not_after: candidate.permission_not_after,
+                    };
+                    return PolicyDecision::Allow {
+                        source_identity,
+                        permission,
+                    };
+                }
                 Err(reason) => last_denial = Some(reason),
             }
         }
@@ -314,7 +343,7 @@ fn verify_signature(candidate: &CandidatePermission) -> anyhow::Result<()> {
 
 fn canonical_permission_bytes(candidate: &CandidatePermission) -> Vec<u8> {
     format!(
-        "agent-gateway-permission-v1\npermission_id={}\nsigning_key_id={}\nsubject_identity={}\nsubject_public_key_spki_der={}\ndestination={}\nnot_before={}\nnot_after={}\n",
+        "agent-gateway-permission-v2\npermission_id={}\nsigning_key_id={}\nsubject_identity={}\nsubject_public_key_spki_der={}\ndestination={}\nnot_before={}\nnot_after={}\ncapacity_bytes={}\nrefill_bytes_per_sec={}\n",
         candidate.permission_id,
         candidate.signing_key_id,
         candidate.subject_identity,
@@ -326,6 +355,8 @@ fn canonical_permission_bytes(candidate: &CandidatePermission) -> Vec<u8> {
         candidate
             .permission_not_after
             .to_rfc3339_opts(SecondsFormat::Micros, true),
+        candidate.capacity_bytes,
+        candidate.refill_bytes_per_sec,
     )
     .into_bytes()
 }
@@ -462,6 +493,8 @@ mod tests {
             signing_key_id: "org-alice".to_owned(),
             permission_not_before: Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).single().unwrap(),
             permission_not_after: Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).single().unwrap(),
+            capacity_bytes: 1024,
+            refill_bytes_per_sec: 256,
             signature: vec![],
             signer_algorithm: "ecdsa_p256_sha256".to_owned(),
             signer_public_key_spki_der: vec![],
@@ -473,7 +506,7 @@ mod tests {
 
         assert_eq!(
             canonical_permission_bytes(&candidate),
-            b"agent-gateway-permission-v1\npermission_id=perm-1\nsigning_key_id=org-alice\nsubject_identity=agent-alpha\nsubject_public_key_spki_der=305901\ndestination=api.example.com:443\nnot_before=2026-05-01T00:00:00.000000Z\nnot_after=2026-06-01T00:00:00.000000Z\n"
+            b"agent-gateway-permission-v2\npermission_id=perm-1\nsigning_key_id=org-alice\nsubject_identity=agent-alpha\nsubject_public_key_spki_der=305901\ndestination=api.example.com:443\nnot_before=2026-05-01T00:00:00.000000Z\nnot_after=2026-06-01T00:00:00.000000Z\ncapacity_bytes=1024\nrefill_bytes_per_sec=256\n"
         );
     }
 }

@@ -21,6 +21,10 @@ use agent_gateway::policy::PolicyEngine;
 use agent_gateway::proxy::MakeProxyService;
 
 const CLIENT_EXTENSION_OID: &[u64] = &[1, 3, 6, 1, 4, 1, 57264, 1, 1];
+/// "Effectively unlimited" byte budget for tests that don't care about
+/// the rate limit. Uses `i64::MAX as u64` so the value fits Postgres BIGINT
+/// without wrapping when we cast back at insert time. ~9 exabytes.
+const UNLIMITED_BYTES: u64 = i64::MAX as u64;
 static TEST_ID: AtomicU64 = AtomicU64::new(1);
 static TEST_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
@@ -356,6 +360,7 @@ pub struct TestAuthzRegistry {
 pub struct SeededPermission {
     pub permission_id: String,
     pub normalized_destination: String,
+    pub not_after: DateTime<Utc>,
 }
 
 impl TestAuthzRegistry {
@@ -458,6 +463,8 @@ impl TestAuthzRegistry {
             subject_public_key_spki_der,
             destination,
             true,
+            UNLIMITED_BYTES,
+            UNLIMITED_BYTES,
         )
         .await
     }
@@ -473,6 +480,44 @@ impl TestAuthzRegistry {
             .await
     }
 
+    pub async fn allow_with_limits(
+        &self,
+        subject_identity: &str,
+        subject_public_key_spki_der: &[u8],
+        destination: &str,
+        capacity_bytes: u64,
+        refill_bytes_per_sec: u64,
+    ) -> SeededPermission {
+        self.allow_inner(
+            subject_identity,
+            subject_public_key_spki_der,
+            destination,
+            true,
+            capacity_bytes,
+            refill_bytes_per_sec,
+        )
+        .await
+    }
+
+    pub async fn allow_with_limits_for_pki(
+        &self,
+        pki: &TestPki,
+        subject_identity: &str,
+        destination: &str,
+        capacity_bytes: u64,
+        refill_bytes_per_sec: u64,
+    ) -> SeededPermission {
+        let subject_public_key_spki_der = pki.client_spki_der();
+        self.allow_with_limits(
+            subject_identity,
+            &subject_public_key_spki_der,
+            destination,
+            capacity_bytes,
+            refill_bytes_per_sec,
+        )
+        .await
+    }
+
     pub async fn allow_without_signer_scope(
         &self,
         subject_identity: &str,
@@ -484,6 +529,8 @@ impl TestAuthzRegistry {
             subject_public_key_spki_der,
             destination,
             false,
+            UNLIMITED_BYTES,
+            UNLIMITED_BYTES,
         )
         .await
     }
@@ -530,12 +577,15 @@ impl TestAuthzRegistry {
         .expect("tamper permission destination");
     }
 
+    #[allow(clippy::cast_possible_wrap)]
     async fn allow_inner(
         &self,
         subject_identity: &str,
         subject_public_key_spki_der: &[u8],
         destination: &str,
         include_scope: bool,
+        capacity_bytes: u64,
+        refill_bytes_per_sec: u64,
     ) -> SeededPermission {
         let permission_id = unique_id("test-permission");
         let (not_before, not_after) = active_window();
@@ -566,17 +616,25 @@ impl TestAuthzRegistry {
             destination,
             not_before,
             not_after,
+            capacity_bytes,
+            refill_bytes_per_sec,
         );
         let signature: p256::ecdsa::Signature = self.signing_key.sign(&signed_bytes);
         let signature_der = signature.to_der();
+
+        // The CHECK constraint in migration 0002 enforces non-negative on
+        // capacity_bytes and refill_bytes_per_sec, and tests stay below
+        // `i64::MAX as u64`, so the cast back to i64 cannot wrap.
+        let capacity_for_db = capacity_bytes.min(i64::MAX as u64) as i64;
+        let refill_for_db = refill_bytes_per_sec.min(i64::MAX as u64) as i64;
 
         sqlx::query!(
             r"
             INSERT INTO permission_registry (
                 permission_id, signing_key_id, subject_identity, subject_public_key_spki_der, destination,
-                not_before, not_after, signature
+                not_before, not_after, signature, capacity_bytes, refill_bytes_per_sec
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             ",
             &permission_id,
             &self.key_id,
@@ -586,6 +644,8 @@ impl TestAuthzRegistry {
             not_before,
             not_after,
             signature_der.as_bytes(),
+            capacity_for_db,
+            refill_for_db,
         )
         .execute(&self.pool)
         .await
@@ -594,6 +654,7 @@ impl TestAuthzRegistry {
         SeededPermission {
             permission_id,
             normalized_destination: destination.to_owned(),
+            not_after,
         }
     }
 }
@@ -652,6 +713,7 @@ fn active_window() -> (DateTime<Utc>, DateTime<Utc>) {
     (now - Duration::hours(1), now + Duration::hours(1))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn test_canonical_permission_bytes(
     permission_id: &str,
     signing_key_id: &str,
@@ -660,9 +722,11 @@ fn test_canonical_permission_bytes(
     destination: &str,
     not_before: DateTime<Utc>,
     not_after: DateTime<Utc>,
+    capacity_bytes: u64,
+    refill_bytes_per_sec: u64,
 ) -> Vec<u8> {
     format!(
-        "agent-gateway-permission-v1\npermission_id={permission_id}\nsigning_key_id={signing_key_id}\nsubject_identity={subject_identity}\nsubject_public_key_spki_der={}\ndestination={destination}\nnot_before={}\nnot_after={}\n",
+        "agent-gateway-permission-v2\npermission_id={permission_id}\nsigning_key_id={signing_key_id}\nsubject_identity={subject_identity}\nsubject_public_key_spki_der={}\ndestination={destination}\nnot_before={}\nnot_after={}\ncapacity_bytes={capacity_bytes}\nrefill_bytes_per_sec={refill_bytes_per_sec}\n",
         lower_hex(subject_public_key_spki_der),
         not_before.to_rfc3339_opts(SecondsFormat::Micros, true),
         not_after.to_rfc3339_opts(SecondsFormat::Micros, true),

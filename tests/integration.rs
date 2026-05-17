@@ -541,3 +541,39 @@ async fn proxy_dest_ipv6_matches_policy() {
     assert_deny(&eval(engine.as_ref(), &pki, "[::1]:443").await);
     registry.cleanup().await;
 }
+
+#[tokio::test]
+async fn policy_rejects_tampered_capacity_column() {
+    let subject = unique_test_identity("agent-alpha");
+    let registry = TestAuthzRegistry::new().await;
+    let pki = TestPki::new(&subject);
+    let seeded = registry
+        .allow_with_limits_for_pki(&pki, &subject, "api.example.com:443", 1000, 100)
+        .await;
+
+    sqlx::query!(
+        "UPDATE permission_registry SET capacity_bytes = capacity_bytes * 10 WHERE permission_id = $1",
+        &seeded.permission_id
+    )
+    .execute(&registry.pool)
+    .await
+    .expect("tamper capacity_bytes");
+
+    let engine = registry.engine(EXT_OID).await;
+    let ctx = agent_gateway::policy::RequestContext {
+        peer_certificates: pki.client_cert_chain(),
+        destination: "api.example.com:443".into(),
+    };
+    match engine.evaluate(&ctx).await {
+        PolicyDecision::Deny { reason, .. } => {
+            assert!(
+                reason.contains("invalid permission signature"),
+                "expected signature verification failure, got: {reason}"
+            );
+        }
+        PolicyDecision::Allow { .. } => {
+            panic!("tampered row should not verify, but policy allowed it")
+        }
+    }
+    registry.cleanup().await;
+}
