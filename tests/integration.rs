@@ -633,3 +633,80 @@ async fn policy_with_rate_limit_exhausts_then_denies() {
 
     registry.cleanup().await;
 }
+
+#[tokio::test]
+async fn tunnel_closes_when_permission_revoked() {
+    let _guard = common::serial_test_lock().await;
+    let log = common::init_tracing_capture();
+    common::drain_events(&log);
+
+    let (echo_addr, _echo_guard) = common::start_echo_server().await;
+    let dest = format!("127.0.0.1:{}", echo_addr.port());
+
+    let subject = unique_test_identity("agent-alpha");
+    let pki = TestPki::new(&subject);
+    let registry = TestAuthzRegistry::new().await;
+    let seeded = registry
+        .allow_with_limits_for_pki(&pki, &subject, &dest, 1_000_000, 1_000_000)
+        .await;
+    let engine = registry.engine(EXT_OID).await;
+    let (proxy_addr, _proxy_guard, bucket_store) =
+        common::start_proxy_with_store(&pki, engine).await;
+
+    let mut send_req = common::connect_client(proxy_addr, &pki).await;
+    let req = hyper::Request::connect(&dest)
+        .body(http_body_util::Empty::<bytes::Bytes>::new())
+        .unwrap();
+    let resp = send_req.send_request(req).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let upgraded = hyper::upgrade::on(resp).await.unwrap();
+    let mut io = hyper_util::rt::TokioIo::new(upgraded);
+
+    // Confirm the tunnel works for a small write before revocation.
+    tokio::io::AsyncWriteExt::write_all(&mut io, b"hello")
+        .await
+        .expect("first write should succeed");
+
+    // Revoke the permission via the same SQL the registry-cli would issue.
+    sqlx::query!(
+        "UPDATE permission_registry SET revoked_at = now() WHERE permission_id = $1",
+        &seeded.permission_id
+    )
+    .execute(&registry.pool)
+    .await
+    .expect("revoke permission");
+
+    // Simulate the revocation-poll task's work directly. Keeps the test
+    // deterministic without waiting on the 30-second timer.
+    let revoked_ids: Vec<String> = sqlx::query_scalar!(
+        "SELECT permission_id FROM permission_registry WHERE revoked_at IS NOT NULL"
+    )
+    .fetch_all(&registry.pool)
+    .await
+    .expect("list revoked");
+    assert!(
+        revoked_ids.contains(&seeded.permission_id),
+        "revoked list should include our permission"
+    );
+    for id in &revoked_ids {
+        bucket_store.mark_revoked(id);
+    }
+
+    // The next write should fail because the bucket is now dead. We loop
+    // a small number of times because the tunnel write path may buffer
+    // a tiny amount in the h2 layer before the error surfaces.
+    let mut closed = false;
+    for _ in 0..16 {
+        if tokio::io::AsyncWriteExt::write_all(&mut io, b"more data")
+            .await
+            .is_err()
+        {
+            closed = true;
+            break;
+        }
+    }
+    assert!(closed, "write after revocation should eventually fail");
+
+    registry.cleanup().await;
+}

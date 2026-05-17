@@ -80,6 +80,18 @@ pub async fn build_engine(config: &PolicyConfig) -> anyhow::Result<Arc<dyn Polic
     )?))
 }
 
+/// Build a Postgres pool with the same configuration the policy engine uses.
+/// Used by the gateway's revocation poll task to issue read-only queries
+/// against `permission_registry`.
+///
+/// # Errors
+///
+/// Returns an error if the database URL is invalid or the database cannot
+/// be reached.
+pub async fn build_pool(config: &PolicyConfig) -> anyhow::Result<PgPool> {
+    build_pg_pool(config).await
+}
+
 async fn build_pg_pool(policy: &PolicyConfig) -> anyhow::Result<PgPool> {
     let database_url = policy.database_url()?;
     let connect_options = PgConnectOptions::from_str(&database_url)

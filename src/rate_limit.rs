@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Instant;
@@ -22,6 +23,7 @@ pub struct TokenBucket {
     capacity_bytes: u64,
     refill_bytes_per_sec: u64,
     permission_not_after: DateTime<Utc>,
+    revoked: AtomicBool,
 }
 
 impl TokenBucket {
@@ -43,7 +45,17 @@ impl TokenBucket {
             capacity_bytes,
             refill_bytes_per_sec,
             permission_not_after,
+            revoked: AtomicBool::new(false),
         }
+    }
+
+    /// Mark this bucket as revoked. Subsequent consume and peek operations
+    /// return 0. Idempotent: calling on an already-revoked bucket is a
+    /// no-op. The Release ordering on the store pairs with the Acquire
+    /// load in `is_dead` so the revocation is visible to every subsequent
+    /// dead-check across threads.
+    pub fn mark_revoked(&self) {
+        self.revoked.store(true, Ordering::Release);
     }
 
     /// Atomically grants up to `max` bytes of budget. Returns the number
@@ -110,7 +122,7 @@ impl TokenBucket {
     }
 
     fn is_dead(&self) -> bool {
-        Utc::now() >= self.permission_not_after
+        self.revoked.load(Ordering::Acquire) || Utc::now() >= self.permission_not_after
     }
 
     #[allow(clippy::cast_precision_loss)]
@@ -161,6 +173,16 @@ impl BucketStore {
         ));
         map.insert(permission_id.to_owned(), bucket.clone());
         bucket
+    }
+
+    /// Mark the bucket for `permission_id` as revoked, if one exists.
+    /// No-op for `permission_id`s the gateway has not seen yet. Called by
+    /// the background revocation poll task in `main.rs`.
+    pub fn mark_revoked(&self, permission_id: &str) {
+        let map = self.map.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(bucket) = map.get(permission_id) {
+            bucket.mark_revoked();
+        }
     }
 }
 
@@ -370,6 +392,41 @@ mod tests {
         assert_eq!(bucket.try_consume_up_to(100), 0);
         assert_eq!(bucket.available_bytes(), 0);
         assert_eq!(bucket.seconds_until_one_byte(), None);
+    }
+
+    #[test]
+    fn revoked_bucket_returns_zero() {
+        let bucket = TokenBucket::new(1000, 100, far_future());
+        assert!(bucket.available_bytes() > 0);
+        bucket.mark_revoked();
+        assert_eq!(bucket.try_consume_up_to(100), 0);
+        assert_eq!(bucket.available_bytes(), 0);
+        assert_eq!(bucket.seconds_until_one_byte(), None);
+    }
+
+    #[test]
+    fn mark_revoked_is_idempotent() {
+        let bucket = TokenBucket::new(1000, 100, far_future());
+        bucket.mark_revoked();
+        bucket.mark_revoked();
+        assert_eq!(bucket.try_consume_up_to(1), 0);
+    }
+
+    #[test]
+    fn bucket_store_mark_revoked_revokes_existing_bucket() {
+        let store = BucketStore::new();
+        let bucket = store.get_or_create("perm-1", 1000, 100, far_future());
+        assert!(bucket.available_bytes() > 0);
+        store.mark_revoked("perm-1");
+        assert_eq!(bucket.available_bytes(), 0);
+    }
+
+    #[test]
+    fn bucket_store_mark_revoked_is_noop_for_unknown_permission_id() {
+        let store = BucketStore::new();
+        store.mark_revoked("never-seen");
+        // No panic, no error. Acceptable; the poll task may query
+        // permission_ids the gateway has not yet served.
     }
 
     #[test]
