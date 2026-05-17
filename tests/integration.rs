@@ -577,3 +577,59 @@ async fn policy_rejects_tampered_capacity_column() {
     }
     registry.cleanup().await;
 }
+
+#[tokio::test]
+async fn policy_with_rate_limit_exhausts_then_denies() {
+    let _guard = common::serial_test_lock().await;
+    let log = common::init_tracing_capture();
+    common::drain_events(&log);
+
+    let subject = unique_test_identity("agent-alpha");
+    let registry = TestAuthzRegistry::new().await;
+    let pki = TestPki::new(&subject);
+    let (echo_addr, _echo_guard) = common::start_echo_server().await;
+    let dest = format!("127.0.0.1:{}", echo_addr.port());
+
+    let seeded = registry
+        .allow_with_limits_for_pki(&pki, &subject, &dest, 100, 0)
+        .await;
+
+    let engine = registry.engine(EXT_OID).await;
+    let (proxy_addr, _proxy_guard, store) =
+        common::start_proxy_with_store(&pki, engine).await;
+
+    // First CONNECT: should succeed because the bucket starts at full capacity.
+    let mut send_req = common::connect_client(proxy_addr, &pki).await;
+    let req = hyper::Request::connect(&dest)
+        .body(http_body_util::Empty::<bytes::Bytes>::new())
+        .unwrap();
+    let resp = send_req.send_request(req).await.unwrap();
+    assert_eq!(resp.status(), 200, "first CONNECT should be allowed");
+    drop(resp);
+
+    // Drain the bucket directly via the test-held store. Mid-tunnel
+    // enforcement lands in the next commit; at this stage the tunnel
+    // writes do not yet flow through MeteredStream, so we drain
+    // explicitly. get_or_create returns the existing bucket because
+    // the proxy already created it during the first CONNECT.
+    let bucket = store.get_or_create(&seeded.permission_id, 100, 0, seeded.not_after);
+    assert_eq!(
+        bucket.try_consume_up_to(100),
+        100,
+        "drain should consume exactly the bucket's capacity"
+    );
+
+    // Second CONNECT on a fresh client: bucket is now empty, expect 429.
+    let mut send_req2 = common::connect_client(proxy_addr, &pki).await;
+    let req2 = hyper::Request::connect(&dest)
+        .body(http_body_util::Empty::<bytes::Bytes>::new())
+        .unwrap();
+    let resp2 = send_req2.send_request(req2).await.unwrap();
+    assert_eq!(
+        resp2.status(),
+        429,
+        "second CONNECT should be rate-limited"
+    );
+
+    registry.cleanup().await;
+}

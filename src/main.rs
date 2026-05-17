@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent_gateway::proxy::MakeProxyService;
+use agent_gateway::rate_limit::BucketStore;
 use agent_gateway::{config, observability, policy, proxy, tls};
 use anyhow::Context;
 use clap::Parser;
@@ -37,7 +38,8 @@ async fn serve(config: config::Config) -> anyhow::Result<()> {
     let tls_acceptor = tls::TlsAcceptor::from(server_tls);
 
     let policy_engine = policy::build_engine(&config.policy).await?;
-    let make_service = Arc::new(MakeProxyService::new(policy_engine));
+    let bucket_store = Arc::new(BucketStore::new());
+    let make_service = Arc::new(MakeProxyService::new(policy_engine, bucket_store));
 
     let listen_addr: std::net::SocketAddr = config.server.listen_addr.parse()?;
     let listener = TcpListener::bind(listen_addr).await?;

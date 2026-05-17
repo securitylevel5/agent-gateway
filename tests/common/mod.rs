@@ -765,6 +765,17 @@ pub async fn start_proxy(
     pki: &TestPki,
     policy_engine: Arc<dyn PolicyEngine>,
 ) -> (SocketAddr, ServerGuard) {
+    let (addr, guard, _store) = start_proxy_with_store(pki, policy_engine).await;
+    (addr, guard)
+}
+
+/// Like `start_proxy` but also returns a handle to the in-process
+/// `BucketStore` so tests can inspect bucket state, drain buckets directly,
+/// or call `mark_revoked` without waiting on a background timer.
+pub async fn start_proxy_with_store(
+    pki: &TestPki,
+    policy_engine: Arc<dyn PolicyEngine>,
+) -> (SocketAddr, ServerGuard, Arc<agent_gateway::rate_limit::BucketStore>) {
     install_test_crypto_provider();
 
     let mut server_config = rustls::ServerConfig::builder()
@@ -775,7 +786,8 @@ pub async fn start_proxy(
 
     let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
 
-    let make_service = Arc::new(MakeProxyService::new(policy_engine));
+    let bucket_store = Arc::new(agent_gateway::rate_limit::BucketStore::new());
+    let make_service = Arc::new(MakeProxyService::new(policy_engine, bucket_store.clone()));
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -812,7 +824,7 @@ pub async fn start_proxy(
         }
     });
 
-    (addr, ServerGuard { task })
+    (addr, ServerGuard { task }, bucket_store)
 }
 
 /// Connect an HTTP/2 mTLS client to the proxy. Returns a `SendRequest` handle.

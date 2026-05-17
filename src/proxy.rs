@@ -21,6 +21,7 @@ use tracing::{Instrument, error, info, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::policy::{self, PolicyDecision, PolicyEngine, RequestContext};
+use crate::rate_limit::BucketStore;
 
 type ProxyBody = BoxBody<Bytes, Infallible>;
 
@@ -43,6 +44,7 @@ fn extract_trace_context(headers: &HeaderMap) -> opentelemetry::Context {
 #[derive(Clone)]
 pub struct ProxyService {
     policy_engine: Arc<dyn PolicyEngine>,
+    bucket_store: Arc<BucketStore>,
     peer_certs: Vec<CertificateDer<'static>>,
     source_peer_addr: SocketAddr,
 }
@@ -50,11 +52,13 @@ pub struct ProxyService {
 impl ProxyService {
     fn new(
         policy_engine: Arc<dyn PolicyEngine>,
+        bucket_store: Arc<BucketStore>,
         peer_certs: Vec<CertificateDer<'static>>,
         source_peer_addr: SocketAddr,
     ) -> Self {
         Self {
             policy_engine,
+            bucket_store,
             peer_certs,
             source_peer_addr,
         }
@@ -84,9 +88,10 @@ impl ProxyService {
                 destination: dest.authority.clone(),
             };
 
-            let source_identity = match self.policy_engine.evaluate(&ctx).await {
+            let (source_identity, permission) = match self.policy_engine.evaluate(&ctx).await {
                 PolicyDecision::Allow {
-                    source_identity, ..
+                    source_identity,
+                    permission,
                 } => {
                     info!(
                         source_identity = %source_identity,
@@ -95,7 +100,7 @@ impl ProxyService {
                         policy_decision = "allow",
                         "CONNECT allowed"
                     );
-                    source_identity
+                    (source_identity, permission)
                 }
                 PolicyDecision::Deny {
                     source_identity,
@@ -110,6 +115,32 @@ impl ProxyService {
                     return response(StatusCode::FORBIDDEN, "forbidden");
                 }
             };
+
+            let bucket = self.bucket_store.get_or_create(
+                &permission.permission_id,
+                permission.capacity_bytes,
+                permission.refill_bytes_per_sec,
+                permission.not_after,
+            );
+            if bucket.available_bytes() == 0 {
+                let retry_after = bucket.seconds_until_one_byte();
+                warn!(
+                    source_identity = %source_identity,
+                    source_peer_addr = %self.source_peer_addr,
+                    dest_authority = %dest.authority,
+                    permission_id = %permission.permission_id,
+                    policy_decision = "rate_limit_deny",
+                    retry_after_seconds = retry_after.unwrap_or(0),
+                    "CONNECT rate-limited"
+                );
+                let mut resp = response(StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded");
+                if let Some(secs) = retry_after
+                    && let Ok(value) = http::HeaderValue::from_str(&secs.to_string())
+                {
+                    resp.headers_mut().insert("retry-after", value);
+                }
+                return resp;
+            }
 
             // Connect to destination BEFORE returning 200 so the client knows
             // the tunnel is actually established.
@@ -156,11 +187,15 @@ impl Service<Request<Incoming>> for ProxyService {
 
 pub struct MakeProxyService {
     policy_engine: Arc<dyn PolicyEngine>,
+    bucket_store: Arc<BucketStore>,
 }
 
 impl MakeProxyService {
-    pub fn new(policy_engine: Arc<dyn PolicyEngine>) -> Self {
-        Self { policy_engine }
+    pub fn new(policy_engine: Arc<dyn PolicyEngine>, bucket_store: Arc<BucketStore>) -> Self {
+        Self {
+            policy_engine,
+            bucket_store,
+        }
     }
 
     #[must_use]
@@ -169,7 +204,12 @@ impl MakeProxyService {
         peer_certs: Vec<CertificateDer<'static>>,
         source_peer_addr: SocketAddr,
     ) -> ProxyService {
-        ProxyService::new(self.policy_engine.clone(), peer_certs, source_peer_addr)
+        ProxyService::new(
+            self.policy_engine.clone(),
+            self.bucket_store.clone(),
+            peer_certs,
+            source_peer_addr,
+        )
     }
 }
 
