@@ -1,10 +1,13 @@
+use std::num::NonZeroU64;
 use std::time::Duration;
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgPool;
 
-const EXPECTED_SCHEMA_VERSION: i32 = 1;
+use crate::policy::SubjectIdentity;
+
+const EXPECTED_SCHEMA_VERSION: i32 = 2;
 
 #[derive(Clone)]
 pub(crate) struct RegistryStore {
@@ -134,5 +137,34 @@ impl RegistryStore {
             .await
             .context("authorization registry signer scope lookup timed out")?
             .context("querying authorization registry signer scope")
+    }
+
+    pub(crate) async fn subject_identity(
+        &self,
+        subject_identity: String,
+    ) -> anyhow::Result<SubjectIdentity> {
+        let query = sqlx::query_scalar!(
+            r#"
+            SELECT rate_limit_bytes_per_second
+            FROM identity_metadata
+            WHERE subject_identity = $1
+            "#,
+            &subject_identity,
+        );
+
+        let rate_limit = tokio::time::timeout(self.query_timeout, query.fetch_optional(&self.pool))
+            .await
+            .context("authorization registry identity metadata lookup timed out")?
+            .context("querying authorization registry identity metadata")?
+            .flatten()
+            .map(Self::rate_limit_from_db)
+            .transpose()?;
+
+        Ok(SubjectIdentity::new(subject_identity, rate_limit))
+    }
+
+    fn rate_limit_from_db(value: i64) -> anyhow::Result<NonZeroU64> {
+        let value = u64::try_from(value).context("identity rate limit must be positive")?;
+        NonZeroU64::new(value).context("identity rate limit must be non-zero")
     }
 }

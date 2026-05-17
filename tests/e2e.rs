@@ -139,6 +139,61 @@ async fn tunnel_echoes_data() {
 }
 
 #[tokio::test]
+async fn tunnel_rate_limits_echo_data_per_identity() {
+    let _guard = serial_test_lock().await;
+    let log = init_tracing_capture();
+    drain_events(&log);
+
+    let (echo_addr, _echo_guard) = start_echo_server().await;
+
+    let subject = unique_test_identity("agent-alpha");
+    let pki = TestPki::new(&subject);
+    let policy = policy_allowing(
+        &pki,
+        &subject,
+        vec![format!("127.0.0.1:{}", echo_addr.port())],
+    )
+    .await;
+    policy.set_identity_rate_limit(&subject, Some(4_096)).await;
+    let (proxy_addr, _proxy_guard) = start_proxy(&pki, policy.engine()).await;
+
+    let mut send_req = common::connect_client(proxy_addr, &pki).await;
+
+    let dest = format!("127.0.0.1:{}", echo_addr.port());
+    let req = Request::connect(&dest)
+        .body(Empty::<bytes::Bytes>::new())
+        .unwrap();
+
+    let resp = send_req.send_request(req).await.unwrap();
+    assert_eq!(resp.status(), 200, "expected 200 OK for allowed CONNECT");
+
+    let upgraded = hyper::upgrade::on(resp).await.unwrap();
+    let mut io = hyper_util::rt::TokioIo::new(upgraded);
+    let payload = vec![0x5a; 4_096];
+
+    let start = std::time::Instant::now();
+    io.write_all(&payload).await.unwrap();
+    io.shutdown().await.unwrap();
+
+    let mut buf = Vec::new();
+    io.read_to_end(&mut buf).await.unwrap();
+    let elapsed = start.elapsed();
+    assert_eq!(buf, payload, "echo server should return the same data");
+    assert!(
+        elapsed >= std::time::Duration::from_millis(500),
+        "round trip should be throttled by the shared identity bucket, elapsed {elapsed:?}"
+    );
+
+    let events = wait_for_event(&log, "tunnel closed", EVENT_TIMEOUT).await;
+    let closed_evt = find_event(&events, "tunnel closed").expect("expected tunnel closed event");
+    assert_field_eq(closed_evt, "source_identity", &subject);
+    assert_field_eq(closed_evt, "dest_authority", &dest);
+    assert_field_eq(closed_evt, "bytes_client_to_dest", "4096");
+    assert_field_eq(closed_evt, "bytes_dest_to_client", "4096");
+    policy.cleanup().await;
+}
+
+#[tokio::test]
 async fn tunnel_policy_deny() {
     let _guard = serial_test_lock().await;
     let log = init_tracing_capture();

@@ -19,13 +19,14 @@ The visible behavior is that an identity with no rate-limit row behaves exactly 
 - [x] (2026-05-17T04:47Z) Updated the plan to reflect the user decision to introduce a `SubjectIdentity` struct carrying identity metadata instead of threading a raw identity string and separate settings.
 - [x] (2026-05-17T04:51Z) Updated the plan so `RegistryStore` returns a complete `SubjectIdentity`, with absent identity metadata represented as an unlimited identity rather than as `None`.
 - [x] (2026-05-17T04:54Z) Updated the limiter design to use per-bucket `std::sync::Mutex` locking, while keeping a short-lived map lock only for bucket lookup and creation.
-- [ ] Implement the registry schema and SQLx metadata changes.
-- [ ] Add `SubjectIdentity` and thread it through policy evaluation.
-- [ ] Add a process-local shared token bucket limiter.
-- [ ] Replace the tunnel copy path with a rate-aware bidirectional copy loop.
-- [ ] Add focused unit, integration, and e2e tests.
-- [ ] Run formatting, SQLx metadata checks, clippy, and the full test suite.
-- [ ] Update README/configuration documentation and record final outcomes.
+- [x] (2026-05-17T05:54Z) Updated the limiter design to cache a `RateLimitHandle` per tunnel so forwarded chunks do not perform a map lookup.
+- [x] (2026-05-17T05:26Z) Implement the registry schema and SQLx metadata changes.
+- [x] (2026-05-17T05:31Z) Add `SubjectIdentity` and thread it through policy evaluation.
+- [x] (2026-05-17T05:31Z) Add a process-local shared token bucket limiter.
+- [x] (2026-05-17T05:31Z) Replace the tunnel copy path with a rate-aware bidirectional copy loop.
+- [x] (2026-05-17T05:31Z) Add focused unit, integration, and e2e tests.
+- [x] (2026-05-17T05:39Z) Run formatting, SQLx metadata checks, clippy, and the full test suite.
+- [x] (2026-05-17T05:39Z) Update README/configuration documentation and record final outcomes.
 
 
 ## Surprises & Discoveries
@@ -38,6 +39,9 @@ The visible behavior is that an identity with no rate-limit row behaves exactly 
 
 - Observation: schema version checking is strict, so adding a migration requires bumping the expected registry schema version.
   Evidence: `src/registry.rs` has `const EXPECTED_SCHEMA_VERSION: i32 = 1` and `verify_schema_version` rejects any other latest version.
+
+- Observation: This checkout has committed `.sqlx` metadata, but `TEST_DATABASE_URL` is not set and `cargo sqlx` is not installed in the current environment.
+  Evidence: `cargo test --locked --no-run` failed on the new SQLx macro with `SQLX_OFFLINE=true` and no cached data; `cargo sqlx --version` returned `error: no such command: sqlx`; `printenv TEST_DATABASE_URL` returned no value.
 
 
 ## Decision Log
@@ -70,6 +74,10 @@ The visible behavior is that an identity with no rate-limit row behaves exactly 
   Rationale: The proof of concept does not need Tokio's `sync` feature as long as no lock is held across `.await`. A short map lock for lookup or insertion is simple, while per-bucket locks reduce unnecessary contention between different identities during high-throughput copying.
   Date/Author: 2026-05-17 / ajd and Codex
 
+- Decision: Cache a per-tunnel `RateLimitHandle` after policy authorization and identity configuration, rather than looking up the bucket in the map for every copied chunk.
+  Rationale: The bucket map is only needed when configuring the identity at CONNECT time. Once a tunnel has an `Arc` to the relevant bucket, each copy loop can use that handle directly and avoid global map lock traffic in the hot path. Unlimited identities use an empty handle that returns immediately.
+  Date/Author: 2026-05-17 / ajd and Codex
+
 - Decision: The gateway refreshes the process-local bucket configuration for an identity when a new CONNECT request for that identity is authorized; it does not poll the database or read metadata per chunk.
   Rationale: A shared bucket must have one current configuration per identity. Refreshing on CONNECT keeps implementation simple and avoids database work in the forwarding loop. Existing tunnels for the same identity may observe the refreshed process-local limit after a later CONNECT for that identity, which is acceptable for this proof of concept and must be documented.
   Date/Author: 2026-05-17 / Codex
@@ -78,6 +86,8 @@ The visible behavior is that an identity with no rate-limit row behaves exactly 
 ## Outcomes & Retrospective
 
 This section is intentionally empty until implementation begins. At completion, record what was implemented, what validation passed, and which proof-of-concept limitations remain.
+
+2026-05-17 / Codex: Implemented the proof of concept. The registry now has `identity_metadata` schema version 2, policy evaluation returns `SubjectIdentity`, the proxy configures a shared process-local `RateLimiter` and passes a cached `RateLimitHandle` into each tunnel, and tunnel forwarding uses rate-aware copy loops for both directions. README documents the table and limitations. Validation passed with `cargo fmt -- --check`, `SQLX_OFFLINE=false DATABASE_URL=postgres://agent_gateway_admin:agent_gateway_dev@localhost:5432/agent_gateway cargo sqlx prepare --check -- --all-targets --locked`, `rustup run stable cargo-clippy --locked --all-targets`, and `SQLX_OFFLINE=true TEST_DATABASE_URL=postgres://agent_gateway_admin:agent_gateway_dev@localhost:5432/agent_gateway cargo test --locked`.
 
 
 ## Context and Orientation
@@ -123,15 +133,15 @@ Then add a registry method for loading identity metadata into the structured ide
 
 Then thread the structured identity through policy evaluation. In `src/policy.rs`, change `PolicyDecision::Allow` to `Allow { subject_identity: SubjectIdentity }`. In `PostgresPolicyEngine::evaluate`, after a candidate permission is accepted, call `self.registry.subject_identity(source_identity).await` and return the resulting `SubjectIdentity` in the allow decision. If the metadata lookup fails, deny the request with the original source identity in `source_identity: Some(...)` and a reason such as `identity metadata lookup failed: ...`; this mirrors existing registry lookup failure behavior. Existing tests that match `Allow { .. }` can continue using wildcard fields, but any exact construction or match must be updated.
 
-After that, add the limiter implementation. Prefer a new module `src/rate_limit.rs`, exported from `src/lib.rs` as `pub mod rate_limit;`, because the logic is independent enough to unit test without TLS or Postgres. Define a cloneable `RateLimiter` type that owns an `Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::Mutex<Bucket>>>>>`. Use `std::sync::Mutex`, not `tokio::sync::Mutex`, so no new Tokio feature is required; do not hold any mutex guard across `.await`. The outer map mutex should be held only long enough to insert, remove, or clone an `Arc` to a per-identity bucket. Token refill and subtraction should happen while holding only that identity bucket's mutex, so unrelated identities do not block each other while copying data.
+After that, add the limiter implementation. Prefer a new module `src/rate_limit.rs`, exported from `src/lib.rs` as `pub mod rate_limit;`, because the logic is independent enough to unit test without TLS or Postgres. Define a cloneable `RateLimiter` type that owns an `Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::Mutex<Bucket>>>>>`. Use `std::sync::Mutex`, not `tokio::sync::Mutex`, so no new Tokio feature is required; do not hold any mutex guard across `.await`. The outer map mutex should be held only long enough to insert, remove, or clone an `Arc` to a per-identity bucket during identity configuration. Token refill and subtraction should happen while holding only that identity bucket's mutex, so unrelated identities do not block each other while copying data.
 
-Define a synchronous method `configure_identity(&self, identity: &SubjectIdentity)` that creates or updates the per-identity bucket when `identity.rate_limit_bytes_per_second()` returns a positive limit, and removes the bucket from the map when it returns `None`. Define an async method `acquire(&self, identity_value: &str, bytes: usize)`. If there is no bucket for that identity value or `bytes == 0`, return immediately. If a bucket exists, clone its `Arc` while holding the map lock, release the map lock, then refill and inspect the bucket under the bucket lock. If enough tokens are present, subtract them and return. If not, compute a sleep duration, release the bucket lock, sleep with `tokio::time::sleep`, and retry. Bucket capacity should be one second of traffic: `limit.get()` tokens. If a read chunk is larger than capacity, acquire it in repeated chunks no larger than capacity so low configured rates can still make progress.
+Define a cloneable `RateLimitHandle` that contains `Option<Arc<std::sync::Mutex<Bucket>>>`. Define a synchronous method `configure_identity(&self, identity: &SubjectIdentity) -> RateLimitHandle` that creates or updates the per-identity bucket when `identity.rate_limit_bytes_per_second()` returns a positive limit, removes the bucket from the map when it returns `None`, and returns the handle that the tunnel should cache. Define an async method `RateLimitHandle::acquire(&self, bytes: usize)`. If the handle has no bucket or `bytes == 0`, return immediately. If a bucket exists, refill and inspect the bucket under the bucket lock. If enough tokens are present, subtract them and return. If not, compute a sleep duration, release the bucket lock, sleep with `tokio::time::sleep`, and retry. Bucket capacity should be one second of traffic: `limit.get()` tokens. If a read chunk is larger than capacity, acquire it in repeated chunks no larger than capacity so low configured rates can still make progress.
 
 Use integer math for refill to keep clippy clean. One workable representation is `Bucket { limit_bytes_per_second: NonZeroU64, capacity: u64, tokens: u64, refill_remainder: u128, last_refill: Instant }`, with nanoseconds as the time unit. On refill, compute `total = elapsed_nanos * u128::from(limit) + refill_remainder`, add `total / 1_000_000_000` tokens up to capacity, and retain `total % 1_000_000_000` as the remainder. When the configured limit for an identity changes, update that identity's bucket under its bucket lock, clamp tokens to the new capacity, and keep the bucket otherwise intact. If the identity becomes unlimited, remove its bucket from the map under the map lock. For a couple-hour proof of concept, do not implement garbage collection of idle buckets beyond removing buckets for identities explicitly configured as unlimited.
 
-Then wire the limiter into the proxy. In `src/proxy.rs`, add `rate_limiter: RateLimiter` to `MakeProxyService` and `ProxyService`. `MakeProxyService::new(policy_engine)` should create `RateLimiter::default()` internally so most callers do not need a new argument. `make_service` should clone the limiter into each `ProxyService`. In `handle`, bind `subject_identity` from the allow decision. After the policy decision allows the CONNECT and before spawning the tunnel, call `rate_limiter.configure_identity(&subject_identity)`. Clone or extract the identity value string from `subject_identity` for logging and as the limiter key in the spawned tunnel. Pass the limiter into `spawn_tunnel`.
+Then wire the limiter into the proxy. In `src/proxy.rs`, add `rate_limiter: RateLimiter` to `MakeProxyService` and `ProxyService`. `MakeProxyService::new(policy_engine)` should create `RateLimiter::default()` internally so most callers do not need a new argument. `make_service` should clone the limiter into each `ProxyService`. In `handle`, bind `subject_identity` from the allow decision. After the policy decision allows the CONNECT and before spawning the tunnel, call `let rate_limit = rate_limiter.configure_identity(&subject_identity)`. Clone or extract the identity value string from `subject_identity` for logging, and pass the `RateLimitHandle` into `spawn_tunnel`.
 
-Replace `copy_bidirectional` with an explicit rate-aware tunnel copy. One straightforward design is to split both streams with `tokio::io::split`, then run two `rate_limited_copy` futures concurrently with `tokio::try_join!`. The client-to-destination copy reads from the upgraded downstream stream, calls `rate_limiter.acquire(source_identity_value.as_str(), n).await`, writes the bytes to the upstream writer, and accumulates the byte count. The destination-to-client copy does the same in reverse and uses the same identity value, so both directions charge the same bucket. On EOF, call `shutdown()` on the writer for that direction. Preserve the existing final log fields `bytes_client_to_dest` and `bytes_dest_to_client` so existing observability expectations continue to hold.
+Replace `copy_bidirectional` with an explicit rate-aware tunnel copy. One straightforward design is to split both streams with `tokio::io::split`, then run two `rate_limited_copy` futures concurrently with `tokio::try_join!`. The client-to-destination copy reads from the upgraded downstream stream, calls `rate_limit.acquire(n).await`, writes the bytes to the upstream writer, and accumulates the byte count. The destination-to-client copy does the same in reverse and uses a clone of the same `RateLimitHandle`, so both directions charge the same bucket. On EOF, call `shutdown()` on the writer for that direction. Preserve the existing final log fields `bytes_client_to_dest` and `bytes_dest_to_client` so existing observability expectations continue to hold.
 
 Finally, update tests and docs. Add unit tests for the token bucket behavior in `src/rate_limit.rs`. Add registry or policy integration tests showing that an identity without metadata is allowed with no limit, an identity with metadata is allowed with the expected limit, and an invalid metadata lookup failure denies authorization if such a failure can be induced cleanly. Add an e2e test that configures a very low limit, transfers enough bytes through the echo tunnel, and asserts elapsed time is greater than a conservative lower bound. Keep timing thresholds loose to avoid flakes. Update `README.md` to describe the `identity_metadata` table and the proof-of-concept limitations.
 
@@ -160,12 +170,13 @@ Work from the repository root: `/home/ajd/projects/sl5_work_test/agent-gateway`.
 4. Add `src/rate_limit.rs`:
 
     - Define `RateLimiter`.
+    - Define `RateLimitHandle`.
     - Define internal `Bucket`.
     - Store buckets as `HashMap<String, Arc<std::sync::Mutex<Bucket>>>` behind a short-lived map mutex.
     - Implement `Default`, `Clone`, `configure_identity`, and `acquire`.
-    - Have `configure_identity` accept `&SubjectIdentity`.
-    - Have `acquire` accept the identity value string key and byte count.
-    - Hold the map mutex only for bucket lookup, insertion, removal, or cloning the bucket `Arc`; hold the bucket mutex only for token accounting; hold no lock across `.await`.
+    - Have `configure_identity` accept `&SubjectIdentity` and return `RateLimitHandle`.
+    - Have `RateLimitHandle::acquire` accept only the byte count.
+    - Hold the map mutex only during identity configuration; hold the bucket mutex only for token accounting; hold no lock across `.await`.
     - Add unit tests using short real-time sleeps with generous assertions. Avoid adding Tokio's `test-util` feature unless the timing tests become too slow or flaky.
 
 5. Edit `src/lib.rs` to export `pub mod rate_limit;`.
@@ -175,8 +186,8 @@ Work from the repository root: `/home/ajd/projects/sl5_work_test/agent-gateway`.
     - Remove the `copy_bidirectional` import.
     - Add `use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};` or equivalent imports.
     - Add the limiter to `MakeProxyService` and `ProxyService`.
-    - Configure the limiter from the allow decision's `SubjectIdentity` before spawning the tunnel.
-    - Use `SubjectIdentity::value()` for log fields and the limiter key.
+    - Configure the limiter from the allow decision's `SubjectIdentity` before spawning the tunnel and pass the returned `RateLimitHandle` into the tunnel.
+    - Use `SubjectIdentity::value()` for log fields.
     - Add `rate_limited_copy`.
     - Use `tokio::try_join!` to run both directions concurrently.
 
@@ -222,7 +233,7 @@ An identity without a row in `identity_metadata` can still connect and tunnel da
 
 An identity with `identity_metadata.rate_limit_bytes_per_second = N` receives `PolicyDecision::Allow { subject_identity }` when it otherwise has a valid signed permission, where `subject_identity.value()` is the certificate identity and `subject_identity.rate_limit_bytes_per_second()` is `Some(N)`. This should be proven with a database-backed integration test.
 
-All active tunnels for the same identity share one limiter in the same process. This can be proven with either a focused unit test that calls `RateLimiter::acquire` concurrently for the same identity or an e2e test with two tunnels if there is enough time. For the proof of concept, the unit test is sufficient if the e2e timing test proves real tunnel throttling.
+All active tunnels for the same identity share one limiter in the same process. This can be proven with either a focused unit test that uses cloned `RateLimitHandle` values for the same identity or an e2e test with two tunnels if there is enough time. For the proof of concept, the unit test is sufficient if the e2e timing test proves real tunnel throttling.
 
 Both traffic directions count against the same configured limit. The e2e timing test should use the echo server so bytes written by the client are also returned by the destination; the observed elapsed time should reflect charging both the outbound and inbound chunks.
 
@@ -316,10 +327,18 @@ In `src/rate_limit.rs`, define:
         buckets: Arc<Mutex<HashMap<String, Arc<Mutex<Bucket>>>>>,
     }
 
-    impl RateLimiter {
-        pub fn configure_identity(&self, identity: &crate::policy::SubjectIdentity);
+    #[derive(Clone, Default)]
+    pub struct RateLimitHandle { ... }
 
-        pub async fn acquire(&self, identity_value: &str, bytes: usize);
+    impl RateLimiter {
+        pub fn configure_identity(
+            &self,
+            identity: &crate::policy::SubjectIdentity,
+        ) -> RateLimitHandle;
+    }
+
+    impl RateLimitHandle {
+        pub async fn acquire(&self, bytes: usize);
     }
 
 In `src/registry.rs`, define:
@@ -347,3 +366,5 @@ This preserves existing call sites in `src/main.rs` and `tests/common/mod.rs`.
 2026-05-17 / Codex: Updated the registry lookup design so `RegistryStore::subject_identity` returns a complete `SubjectIdentity`. Missing `identity_metadata` rows now map to an unlimited `SubjectIdentity` instead of an optional result.
 
 2026-05-17 / Codex: Updated the limiter design to keep `std::sync::Mutex` but use per-bucket locking. The global map lock is now only for managing bucket handles, and each identity's token accounting happens under that identity's own bucket lock.
+
+2026-05-17 / Codex: Updated the limiter design to cache a per-tunnel `RateLimitHandle` returned by `RateLimiter::configure_identity`. Forwarding no longer performs a bucket-map lookup per copied chunk.

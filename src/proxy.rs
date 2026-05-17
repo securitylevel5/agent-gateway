@@ -15,12 +15,13 @@ use opentelemetry::global;
 use opentelemetry::propagation::Extractor;
 use rustls::ServerConnection;
 use rustls_pki_types::CertificateDer;
-use tokio::io::copy_bidirectional;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{Instrument, error, info, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::policy::{self, PolicyDecision, PolicyEngine, RequestContext};
+use crate::rate_limit::{RateLimitHandle, RateLimiter};
 
 type ProxyBody = BoxBody<Bytes, Infallible>;
 
@@ -43,6 +44,7 @@ fn extract_trace_context(headers: &HeaderMap) -> opentelemetry::Context {
 #[derive(Clone)]
 pub struct ProxyService {
     policy_engine: Arc<dyn PolicyEngine>,
+    rate_limiter: RateLimiter,
     peer_certs: Vec<CertificateDer<'static>>,
     source_peer_addr: SocketAddr,
 }
@@ -50,11 +52,13 @@ pub struct ProxyService {
 impl ProxyService {
     fn new(
         policy_engine: Arc<dyn PolicyEngine>,
+        rate_limiter: RateLimiter,
         peer_certs: Vec<CertificateDer<'static>>,
         source_peer_addr: SocketAddr,
     ) -> Self {
         Self {
             policy_engine,
+            rate_limiter,
             peer_certs,
             source_peer_addr,
         }
@@ -84,16 +88,16 @@ impl ProxyService {
                 destination: dest.authority.clone(),
             };
 
-            let source_identity = match self.policy_engine.evaluate(&ctx).await {
-                PolicyDecision::Allow { source_identity } => {
+            let subject_identity = match self.policy_engine.evaluate(&ctx).await {
+                PolicyDecision::Allow { subject_identity } => {
                     info!(
-                        source_identity = %source_identity,
+                        source_identity = %subject_identity.value(),
                         source_peer_addr = %self.source_peer_addr,
                         dest_authority = %dest.authority,
                         policy_decision = "allow",
                         "CONNECT allowed"
                     );
-                    source_identity
+                    subject_identity
                 }
                 PolicyDecision::Deny {
                     source_identity,
@@ -108,6 +112,7 @@ impl ProxyService {
                     return response(StatusCode::FORBIDDEN, "forbidden");
                 }
             };
+            let source_identity = subject_identity.value().to_owned();
 
             // Connect to destination BEFORE returning 200 so the client knows
             // the tunnel is actually established.
@@ -126,9 +131,11 @@ impl ProxyService {
             };
 
             let on_upgrade = hyper::upgrade::on(req);
+            let rate_limit = self.rate_limiter.configure_identity(&subject_identity);
             spawn_tunnel(
                 on_upgrade,
                 upstream,
+                rate_limit,
                 source_identity,
                 self.source_peer_addr,
                 dest.authority,
@@ -154,11 +161,15 @@ impl Service<Request<Incoming>> for ProxyService {
 
 pub struct MakeProxyService {
     policy_engine: Arc<dyn PolicyEngine>,
+    rate_limiter: RateLimiter,
 }
 
 impl MakeProxyService {
     pub fn new(policy_engine: Arc<dyn PolicyEngine>) -> Self {
-        Self { policy_engine }
+        Self {
+            policy_engine,
+            rate_limiter: RateLimiter::default(),
+        }
     }
 
     #[must_use]
@@ -167,7 +178,12 @@ impl MakeProxyService {
         peer_certs: Vec<CertificateDer<'static>>,
         source_peer_addr: SocketAddr,
     ) -> ProxyService {
-        ProxyService::new(self.policy_engine.clone(), peer_certs, source_peer_addr)
+        ProxyService::new(
+            self.policy_engine.clone(),
+            self.rate_limiter.clone(),
+            peer_certs,
+            source_peer_addr,
+        )
     }
 }
 
@@ -206,7 +222,8 @@ fn log_denial(
 
 fn spawn_tunnel(
     on_upgrade: hyper::upgrade::OnUpgrade,
-    mut upstream: TcpStream,
+    upstream: TcpStream,
+    rate_limit: RateLimitHandle,
     source_identity: String,
     source_peer_addr: SocketAddr,
     dest_authority: String,
@@ -229,8 +246,14 @@ fn spawn_tunnel(
             };
 
             let mut downstream = hyper_util::rt::TokioIo::new(upgraded);
+            let (downstream_read, downstream_write) = tokio::io::split(&mut downstream);
+            let (upstream_read, upstream_write) = tokio::io::split(upstream);
 
-            match copy_bidirectional(&mut downstream, &mut upstream).await {
+            let client_to_dest =
+                rate_limited_copy(downstream_read, upstream_write, rate_limit.clone());
+            let dest_to_client = rate_limited_copy(upstream_read, downstream_write, rate_limit);
+
+            match tokio::try_join!(client_to_dest, dest_to_client) {
                 Ok((up, down)) => {
                     info!(
                         source_identity = %source_identity,
@@ -254,6 +277,31 @@ fn spawn_tunnel(
         }
         .instrument(tunnel_span),
     );
+}
+
+async fn rate_limited_copy<R, W>(
+    mut reader: R,
+    mut writer: W,
+    rate_limit: RateLimitHandle,
+) -> std::io::Result<u64>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut buf = [0_u8; 16 * 1024];
+    let mut total = 0_u64;
+
+    loop {
+        let bytes_read = reader.read(&mut buf).await?;
+        if bytes_read == 0 {
+            writer.shutdown().await?;
+            return Ok(total);
+        }
+
+        rate_limit.acquire(bytes_read).await;
+        writer.write_all(&buf[..bytes_read]).await?;
+        total = total.saturating_add(u64::try_from(bytes_read).unwrap_or(u64::MAX));
+    }
 }
 
 fn response(status: StatusCode, message: &str) -> Response<ProxyBody> {

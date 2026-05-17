@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM identity_metadata WHERE subject_identity = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "59c2c346e5f1572cb528413cabf0896cf235a47242f2c82ccc12dc0fc9e2708b"
+}

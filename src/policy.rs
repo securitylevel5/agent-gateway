@@ -1,3 +1,4 @@
+use std::num::NonZeroU64;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -21,12 +22,37 @@ pub struct RequestContext {
 
 pub enum PolicyDecision {
     Allow {
-        source_identity: String,
+        subject_identity: SubjectIdentity,
     },
     Deny {
         source_identity: Option<String>,
         reason: String,
     },
+}
+
+#[derive(Debug, Clone)]
+pub struct SubjectIdentity {
+    value: String,
+    rate_limit_bytes_per_second: Option<NonZeroU64>,
+}
+
+impl SubjectIdentity {
+    pub(crate) fn new(value: String, rate_limit_bytes_per_second: Option<NonZeroU64>) -> Self {
+        Self {
+            value,
+            rate_limit_bytes_per_second,
+        }
+    }
+
+    #[must_use]
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    #[must_use]
+    pub fn rate_limit_bytes_per_second(&self) -> Option<NonZeroU64> {
+        self.rate_limit_bytes_per_second
+    }
 }
 
 #[async_trait]
@@ -193,7 +219,19 @@ impl PolicyEngine for PostgresPolicyEngine {
         let mut last_denial = None;
         for candidate in candidates {
             match self.evaluate_candidate(&candidate, &normalized_dest).await {
-                Ok(()) => return PolicyDecision::Allow { source_identity },
+                Ok(()) => {
+                    return match self
+                        .registry
+                        .subject_identity(source_identity.clone())
+                        .await
+                    {
+                        Ok(subject_identity) => PolicyDecision::Allow { subject_identity },
+                        Err(e) => PolicyDecision::Deny {
+                            source_identity: Some(source_identity),
+                            reason: format!("identity metadata lookup failed: {e:#}"),
+                        },
+                    };
+                }
                 Err(reason) => last_denial = Some(reason),
             }
         }

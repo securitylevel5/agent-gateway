@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT rate_limit_bytes_per_second\n            FROM identity_metadata\n            WHERE subject_identity = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "rate_limit_bytes_per_second",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "924126efaaf9b1d50c24ae577537a7fae2b6c1d6992fb59c11a5a20ff0d875f3"
+}

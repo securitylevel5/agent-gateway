@@ -350,6 +350,7 @@ pub struct TestAuthzRegistry {
     pub pool: sqlx::PgPool,
     signing_key: SigningKey,
     key_id: String,
+    identity_metadata_subjects: Arc<Mutex<Vec<String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -403,6 +404,7 @@ impl TestAuthzRegistry {
             pool,
             signing_key,
             key_id,
+            identity_metadata_subjects: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -424,6 +426,17 @@ impl TestAuthzRegistry {
     }
 
     pub async fn cleanup(&self) {
+        let identity_metadata_subjects =
+            { self.identity_metadata_subjects.lock().unwrap().clone() };
+        for subject_identity in identity_metadata_subjects {
+            sqlx::query!(
+                "DELETE FROM identity_metadata WHERE subject_identity = $1",
+                &subject_identity
+            )
+            .execute(&self.pool)
+            .await
+            .expect("delete test identity metadata");
+        }
         sqlx::query!(
             "DELETE FROM permission_registry WHERE signing_key_id = $1",
             &self.key_id
@@ -445,6 +458,34 @@ impl TestAuthzRegistry {
         .execute(&self.pool)
         .await
         .expect("delete test signing key");
+    }
+
+    pub async fn set_identity_rate_limit(
+        &self,
+        subject_identity: &str,
+        bytes_per_second: Option<i64>,
+    ) {
+        self.identity_metadata_subjects
+            .lock()
+            .unwrap()
+            .push(subject_identity.to_owned());
+        sqlx::query!(
+            r"
+            INSERT INTO identity_metadata (
+                subject_identity, rate_limit_bytes_per_second
+            )
+            VALUES ($1, $2)
+            ON CONFLICT (subject_identity)
+            DO UPDATE SET
+                rate_limit_bytes_per_second = EXCLUDED.rate_limit_bytes_per_second,
+                updated_at = now()
+            ",
+            subject_identity,
+            bytes_per_second,
+        )
+        .execute(&self.pool)
+        .await
+        .expect("upsert test identity metadata");
     }
 
     pub async fn allow(
@@ -606,6 +647,16 @@ pub struct TestPolicyEngine {
 impl TestPolicyEngine {
     pub fn engine(&self) -> Arc<dyn PolicyEngine> {
         self.engine.clone()
+    }
+
+    pub async fn set_identity_rate_limit(
+        &self,
+        subject_identity: &str,
+        bytes_per_second: Option<i64>,
+    ) {
+        self.registry
+            .set_identity_rate_limit(subject_identity, bytes_per_second)
+            .await;
     }
 
     pub async fn cleanup(&self) {

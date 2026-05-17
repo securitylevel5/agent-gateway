@@ -76,13 +76,14 @@ The gateway authorizes a CONNECT only when all of these checks pass:
 
 ### Database Structure
 
-The authorization registry has three main tables:
+The authorization registry has four main tables:
 
 | Table | Key Columns | Purpose |
 |---|---|---|
 | `principal_signing_keys` | `key_id`, `algorithm`, `public_key_spki_der`, `not_before`, `not_after`, `revoked_at` | Stores trusted P-256 public keys that may sign permissions. |
 | `principal_key_permissions` | `signing_key_id`, `destination`, `not_before`, `not_after`, `revoked_at` | Defines which destinations each signing key is allowed to delegate. |
 | `permission_registry` | `permission_id`, `signing_key_id`, `subject_identity`, `subject_public_key_spki_der`, `destination`, `not_before`, `not_after`, `revoked_at`, `signature` | Stores signed permissions that authorize a subject identity and exact subject key to reach a normalized destination. |
+| `identity_metadata` | `subject_identity`, `rate_limit_bytes_per_second` | Stores optional per-identity settings that are independent of destination grants. |
 
 `principal_key_permissions.signing_key_id` and `permission_registry.signing_key_id` both reference `principal_signing_keys.key_id`. A permission is usable only when the permission row is active, the signing key is active, the signature verifies over the canonical row fields, and the signing key has a matching destination delegation row.
 
@@ -100,6 +101,12 @@ not_after=2026-06-01T00:00:00.000000Z
 ```
 
 Destination strings are normalized with the same rules used for CONNECT requests: hostnames are lowercased, omitted ports default to `443`, and IPv6 destinations use bracketed `host:port` form.
+
+### Per-identity rate limits
+
+`identity_metadata.rate_limit_bytes_per_second` optionally configures a process-local byte rate limit for an identity. Missing rows and `NULL` values mean unlimited.
+
+When a CONNECT request is authorized, the gateway refreshes the in-memory bucket for that identity from `identity_metadata`. All active tunnels for the same identity in that gateway process share the same bucket, and both client-to-destination and destination-to-client bytes count against it. The proof-of-concept limiter is not distributed across multiple gateway processes, and restarting the gateway resets in-memory buckets.
 
 ## Client requirements
 

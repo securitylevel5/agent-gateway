@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO identity_metadata (\n                subject_identity, rate_limit_bytes_per_second\n            )\n            VALUES ($1, $2)\n            ON CONFLICT (subject_identity)\n            DO UPDATE SET\n                rate_limit_bytes_per_second = EXCLUDED.rate_limit_bytes_per_second,\n                updated_at = now()\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "48633e01bfb078fd16a8ea365bed0307a01844fa132ae470ac7a4d7df05e670a"
+}

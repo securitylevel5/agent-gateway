@@ -47,6 +47,56 @@ async fn policy_allows_matching_cert_and_destination() {
 }
 
 #[tokio::test]
+async fn policy_allow_without_identity_metadata_has_no_rate_limit() {
+    let subject = unique_test_identity("agent-alpha");
+    let registry = TestAuthzRegistry::new().await;
+    let pki = TestPki::new(&subject);
+    registry
+        .allow_for_pki(&pki, &subject, "api.example.com:443")
+        .await;
+    let engine = registry.engine(EXT_OID).await;
+
+    match eval(engine.as_ref(), &pki, "api.example.com:443").await {
+        PolicyDecision::Allow { subject_identity } => {
+            assert_eq!(subject_identity.value(), subject);
+            assert!(subject_identity.rate_limit_bytes_per_second().is_none());
+        }
+        PolicyDecision::Deny { reason, .. } => panic!("expected Allow, got Deny: {reason}"),
+    }
+
+    registry.cleanup().await;
+}
+
+#[tokio::test]
+async fn policy_allow_with_identity_metadata_has_rate_limit() {
+    let subject = unique_test_identity("agent-alpha");
+    let registry = TestAuthzRegistry::new().await;
+    let pki = TestPki::new(&subject);
+    registry
+        .allow_for_pki(&pki, &subject, "api.example.com:443")
+        .await;
+    registry
+        .set_identity_rate_limit(&subject, Some(2_048))
+        .await;
+    let engine = registry.engine(EXT_OID).await;
+
+    match eval(engine.as_ref(), &pki, "api.example.com:443").await {
+        PolicyDecision::Allow { subject_identity } => {
+            assert_eq!(subject_identity.value(), subject);
+            assert_eq!(
+                subject_identity
+                    .rate_limit_bytes_per_second()
+                    .map(std::num::NonZeroU64::get),
+                Some(2_048)
+            );
+        }
+        PolicyDecision::Deny { reason, .. } => panic!("expected Allow, got Deny: {reason}"),
+    }
+
+    registry.cleanup().await;
+}
+
+#[tokio::test]
 async fn policy_allows_explicit_non_default_port() {
     let subject = unique_test_identity("agent-alpha");
     let registry = TestAuthzRegistry::new().await;
