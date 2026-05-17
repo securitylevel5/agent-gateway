@@ -523,3 +523,108 @@ async fn mtls_accepts_untrusted_ca_but_policy_denies_unregistered_key() {
     );
     policy.cleanup().await;
 }
+
+#[tokio::test]
+async fn tunnel_closes_on_bucket_drain_no_overshoot() {
+    let _guard = serial_test_lock().await;
+    let log = init_tracing_capture();
+    drain_events(&log);
+
+    let (echo_addr, _echo_guard) = start_echo_server().await;
+    let dest = format!("127.0.0.1:{}", echo_addr.port());
+
+    let subject = unique_test_identity("agent-alpha");
+    let pki = TestPki::new(&subject);
+    let registry = common::TestAuthzRegistry::new().await;
+    registry
+        .allow_with_limits_for_pki(&pki, &subject, &dest, 1024, 0)
+        .await;
+    let engine = registry.engine(EXT_OID).await;
+    let (proxy_addr, _proxy_guard) = start_proxy(&pki, engine).await;
+
+    let mut send_req = common::connect_client(proxy_addr, &pki).await;
+    let req = Request::connect(&dest)
+        .body(Empty::<bytes::Bytes>::new())
+        .unwrap();
+    let resp = send_req.send_request(req).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let upgraded = hyper::upgrade::on(resp).await.unwrap();
+    let mut io = hyper_util::rt::TokioIo::new(upgraded);
+
+    // Try to push 4 KiB through a tunnel whose bucket holds 1 KiB.
+    // write_all will fail mid-stream once the bucket drains; we do not
+    // assert on its result, only on the bytes that actually arrived
+    // at the destination-side echo server (echoed back as the tunnel
+    // download). The echo server bounces bytes back as we send them,
+    // so whatever we read here is what got through the metered side.
+    let payload = vec![0u8; 4096];
+    let _ = io.write_all(&payload).await;
+
+    let mut received_back = Vec::new();
+    let _ = io.read_to_end(&mut received_back).await;
+
+    assert!(
+        received_back.len() <= 1024,
+        "echo received {} bytes; bucket capacity was 1024 \u{2014} overshoot detected!",
+        received_back.len()
+    );
+
+    let events = wait_for_event(&log, "tunnel error", EVENT_TIMEOUT).await;
+    let err_evt = find_event(&events, "tunnel error").expect("expected a tunnel error event");
+    let err_msg = err_evt
+        .fields
+        .get("error")
+        .map_or("", String::as_str);
+    assert!(
+        err_msg.contains("rate_limit_exceeded"),
+        "tunnel error message should mention rate_limit_exceeded; got {err_msg:?}"
+    );
+
+    registry.cleanup().await;
+}
+
+#[tokio::test]
+async fn subsequent_connect_after_drain_returns_429() {
+    let _guard = serial_test_lock().await;
+    let log = init_tracing_capture();
+    drain_events(&log);
+
+    let (echo_addr, _echo_guard) = start_echo_server().await;
+    let dest = format!("127.0.0.1:{}", echo_addr.port());
+
+    let subject = unique_test_identity("agent-alpha");
+    let pki = TestPki::new(&subject);
+    let registry = common::TestAuthzRegistry::new().await;
+    registry
+        .allow_with_limits_for_pki(&pki, &subject, &dest, 512, 0)
+        .await;
+    let engine = registry.engine(EXT_OID).await;
+    let (proxy_addr, _proxy_guard) = start_proxy(&pki, engine).await;
+
+    // First CONNECT: drain the bucket through the tunnel.
+    let mut send_req = common::connect_client(proxy_addr, &pki).await;
+    let req = Request::connect(&dest)
+        .body(Empty::<bytes::Bytes>::new())
+        .unwrap();
+    let resp = send_req.send_request(req).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let upgraded = hyper::upgrade::on(resp).await.unwrap();
+    let mut io = hyper_util::rt::TokioIo::new(upgraded);
+    let _ = io.write_all(&[0u8; 2048]).await;
+    drop(io);
+
+    // Wait for the proxy to register the close.
+    let _ = wait_for_event(&log, "tunnel error", EVENT_TIMEOUT).await;
+
+    // Second CONNECT: should return 429.
+    let mut send_req2 = common::connect_client(proxy_addr, &pki).await;
+    let req2 = Request::connect(&dest)
+        .body(Empty::<bytes::Bytes>::new())
+        .unwrap();
+    let resp2 = send_req2.send_request(req2).await.unwrap();
+    assert_eq!(resp2.status(), 429, "second CONNECT should be rate-limited");
+
+    registry.cleanup().await;
+}

@@ -21,7 +21,7 @@ use tracing::{Instrument, error, info, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::policy::{self, PolicyDecision, PolicyEngine, RequestContext};
-use crate::rate_limit::BucketStore;
+use crate::rate_limit::{BucketStore, MeteredStream, TokenBucket};
 
 type ProxyBody = BoxBody<Bytes, Infallible>;
 
@@ -162,6 +162,7 @@ impl ProxyService {
             spawn_tunnel(
                 on_upgrade,
                 upstream,
+                bucket,
                 source_identity,
                 self.source_peer_addr,
                 dest.authority,
@@ -248,7 +249,8 @@ fn log_denial(
 
 fn spawn_tunnel(
     on_upgrade: hyper::upgrade::OnUpgrade,
-    mut upstream: TcpStream,
+    upstream: TcpStream,
+    bucket: Arc<TokenBucket>,
     source_identity: String,
     source_peer_addr: SocketAddr,
     dest_authority: String,
@@ -271,8 +273,9 @@ fn spawn_tunnel(
             };
 
             let mut downstream = hyper_util::rt::TokioIo::new(upgraded);
+            let mut metered_upstream = MeteredStream::new(upstream, bucket);
 
-            match copy_bidirectional(&mut downstream, &mut upstream).await {
+            match copy_bidirectional(&mut downstream, &mut metered_upstream).await {
                 Ok((up, down)) => {
                     info!(
                         source_identity = %source_identity,
