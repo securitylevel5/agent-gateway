@@ -19,6 +19,7 @@ use x509_parser::prelude::*;
 
 use agent_gateway::policy::PolicyEngine;
 use agent_gateway::proxy::MakeProxyService;
+use agent_gateway::rate_limit::{RateLimitConfig, RateLimiter};
 
 const CLIENT_EXTENSION_OID: &[u64] = &[1, 3, 6, 1, 4, 1, 57264, 1, 1];
 static TEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -711,7 +712,8 @@ pub async fn start_proxy(
 
     let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
 
-    let make_service = Arc::new(MakeProxyService::new(policy_engine));
+    let rate_limiter = Arc::new(RateLimiter::new(RateLimitConfig::disabled()));
+    let make_service = Arc::new(MakeProxyService::new(policy_engine, rate_limiter));
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

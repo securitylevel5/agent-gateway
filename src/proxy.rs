@@ -15,12 +15,13 @@ use opentelemetry::global;
 use opentelemetry::propagation::Extractor;
 use rustls::ServerConnection;
 use rustls_pki_types::CertificateDer;
-use tokio::io::copy_bidirectional;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{Instrument, error, info, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::policy::{self, PolicyDecision, PolicyEngine, RequestContext};
+use crate::rate_limit::{RateLimitDecision, RateLimiter};
 
 type ProxyBody = BoxBody<Bytes, Infallible>;
 
@@ -43,6 +44,7 @@ fn extract_trace_context(headers: &HeaderMap) -> opentelemetry::Context {
 #[derive(Clone)]
 pub struct ProxyService {
     policy_engine: Arc<dyn PolicyEngine>,
+    rate_limiter: Arc<RateLimiter>,
     peer_certs: Vec<CertificateDer<'static>>,
     source_peer_addr: SocketAddr,
 }
@@ -50,11 +52,13 @@ pub struct ProxyService {
 impl ProxyService {
     fn new(
         policy_engine: Arc<dyn PolicyEngine>,
+        rate_limiter: Arc<RateLimiter>,
         peer_certs: Vec<CertificateDer<'static>>,
         source_peer_addr: SocketAddr,
     ) -> Self {
         Self {
             policy_engine,
+            rate_limiter,
             peer_certs,
             source_peer_addr,
         }
@@ -132,6 +136,7 @@ impl ProxyService {
                 source_identity,
                 self.source_peer_addr,
                 dest.authority,
+                self.rate_limiter.clone(),
             );
 
             response(StatusCode::OK, "")
@@ -154,11 +159,15 @@ impl Service<Request<Incoming>> for ProxyService {
 
 pub struct MakeProxyService {
     policy_engine: Arc<dyn PolicyEngine>,
+    rate_limiter: Arc<RateLimiter>,
 }
 
 impl MakeProxyService {
-    pub fn new(policy_engine: Arc<dyn PolicyEngine>) -> Self {
-        Self { policy_engine }
+    pub fn new(policy_engine: Arc<dyn PolicyEngine>, rate_limiter: Arc<RateLimiter>) -> Self {
+        Self {
+            policy_engine,
+            rate_limiter,
+        }
     }
 
     #[must_use]
@@ -167,7 +176,12 @@ impl MakeProxyService {
         peer_certs: Vec<CertificateDer<'static>>,
         source_peer_addr: SocketAddr,
     ) -> ProxyService {
-        ProxyService::new(self.policy_engine.clone(), peer_certs, source_peer_addr)
+        ProxyService::new(
+            self.policy_engine.clone(),
+            self.rate_limiter.clone(),
+            peer_certs,
+            source_peer_addr,
+        )
     }
 }
 
@@ -210,6 +224,7 @@ fn spawn_tunnel(
     source_identity: String,
     source_peer_addr: SocketAddr,
     dest_authority: String,
+    rate_limiter: Arc<RateLimiter>,
 ) {
     let tunnel_span = tracing::Span::current();
     tokio::spawn(
@@ -230,16 +245,38 @@ fn spawn_tunnel(
 
             let mut downstream = hyper_util::rt::TokioIo::new(upgraded);
 
-            match copy_bidirectional(&mut downstream, &mut upstream).await {
-                Ok((up, down)) => {
-                    info!(
-                        source_identity = %source_identity,
-                        source_peer_addr = %source_peer_addr,
-                        dest_authority = %dest_authority,
-                        bytes_client_to_dest = up,
-                        bytes_dest_to_client = down,
-                        "tunnel closed"
-                    );
+            match copy_bidirectional_with_rate_limit(
+                &mut downstream,
+                &mut upstream,
+                &source_identity,
+                &rate_limiter,
+            )
+            .await
+            {
+                Ok(TunnelStats {
+                    bytes_client_to_dest,
+                    bytes_dest_to_client,
+                    limited,
+                }) => {
+                    if limited {
+                        warn!(
+                            source_identity = %source_identity,
+                            source_peer_addr = %source_peer_addr,
+                            dest_authority = %dest_authority,
+                            bytes_client_to_dest = bytes_client_to_dest,
+                            bytes_dest_to_client = bytes_dest_to_client,
+                            "tunnel closed after rate limit"
+                        );
+                    } else {
+                        info!(
+                            source_identity = %source_identity,
+                            source_peer_addr = %source_peer_addr,
+                            dest_authority = %dest_authority,
+                            bytes_client_to_dest = bytes_client_to_dest,
+                            bytes_dest_to_client = bytes_dest_to_client,
+                            "tunnel closed"
+                        );
+                    }
                 }
                 Err(e) => {
                     error!(
@@ -254,6 +291,121 @@ fn spawn_tunnel(
         }
         .instrument(tunnel_span),
     );
+}
+
+struct TunnelStats {
+    bytes_client_to_dest: u64,
+    bytes_dest_to_client: u64,
+    limited: bool,
+}
+
+async fn copy_bidirectional_with_rate_limit<D, U>(
+    downstream: &mut D,
+    upstream: &mut U,
+    source_identity: &str,
+    rate_limiter: &RateLimiter,
+) -> std::io::Result<TunnelStats>
+where
+    D: AsyncRead + AsyncWrite + Unpin,
+    U: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut downstream_buf = vec![0_u8; 16 * 1024];
+    let mut upstream_buf = vec![0_u8; 16 * 1024];
+
+    let mut bytes_client_to_dest = 0_u64;
+    let mut bytes_dest_to_client = 0_u64;
+
+    loop {
+        tokio::select! {
+            read_result = downstream.read(&mut downstream_buf) => {
+                let n = read_result?;
+
+                if n == 0 {
+                    upstream.shutdown().await?;
+                    return Ok(TunnelStats {
+                        bytes_client_to_dest,
+                        bytes_dest_to_client,
+                        limited: false,
+                    });
+                }
+
+                match rate_limiter.check_and_record(source_identity, n as u64) {
+                    RateLimitDecision::Allowed => {
+                        upstream.write_all(&downstream_buf[..n]).await?;
+                        bytes_client_to_dest += n as u64;
+                    }
+                    RateLimitDecision::Limited {
+                        bytes_used,
+                        attempted_bytes,
+                        max_bytes,
+                        window_secs,
+                    } => {
+                        warn!(
+                            source_identity = %source_identity,
+                            bytes_used = bytes_used,
+                            attempted_bytes = attempted_bytes,
+                            max_bytes = max_bytes,
+                            window_secs = window_secs,
+                            "rate limit exceeded while proxying client-to-destination data"
+                        );
+
+                        let _ = upstream.shutdown().await;
+                        let _ = downstream.shutdown().await;
+
+                        return Ok(TunnelStats {
+                            bytes_client_to_dest,
+                            bytes_dest_to_client,
+                            limited: true,
+                        });
+                    }
+                }
+            }
+
+            read_result = upstream.read(&mut upstream_buf) => {
+                let n = read_result?;
+
+                if n == 0 {
+                    downstream.shutdown().await?;
+                    return Ok(TunnelStats {
+                        bytes_client_to_dest,
+                        bytes_dest_to_client,
+                        limited: false,
+                    });
+                }
+
+                match rate_limiter.check_and_record(source_identity, n as u64) {
+                    RateLimitDecision::Allowed => {
+                        downstream.write_all(&upstream_buf[..n]).await?;
+                        bytes_dest_to_client += n as u64;
+                    }
+                    RateLimitDecision::Limited {
+                        bytes_used,
+                        attempted_bytes,
+                        max_bytes,
+                        window_secs,
+                    } => {
+                        warn!(
+                            source_identity = %source_identity,
+                            bytes_used = bytes_used,
+                            attempted_bytes = attempted_bytes,
+                            max_bytes = max_bytes,
+                            window_secs = window_secs,
+                            "rate limit exceeded while proxying destination-to-client data"
+                        );
+
+                        let _ = upstream.shutdown().await;
+                        let _ = downstream.shutdown().await;
+
+                        return Ok(TunnelStats {
+                            bytes_client_to_dest,
+                            bytes_dest_to_client,
+                            limited: true,
+                        });
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn response(status: StatusCode, message: &str) -> Response<ProxyBody> {

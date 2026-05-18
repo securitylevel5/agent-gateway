@@ -16,3 +16,10 @@ max_connections = 5
 connect_timeout_ms = 5000
 pool_acquire_timeout_ms = 1000
 query_timeout_ms = 500
+
+# Optional per-identity data limit for proxied traffic.
+# This is intentionally local to one gateway process.
+[rate_limit]
+enabled = false
+window_secs = 60
+max_bytes_per_identity = 10485760

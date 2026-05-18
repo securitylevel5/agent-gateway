@@ -4,6 +4,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::policy;
+use crate::rate_limit::RateLimitConfig;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -11,6 +12,7 @@ pub struct Config {
     pub server: ServerConfig,
     pub observability: ObservabilityConfig,
     pub policy: PolicyConfig,
+    pub rate_limit: Option<RateLimitSection>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -40,6 +42,43 @@ pub struct PolicyConfig {
     pub query_timeout_ms: Option<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RateLimitSection {
+    pub enabled: Option<bool>,
+    pub window_secs: Option<u64>,
+    pub max_bytes_per_identity: Option<u64>,
+}
+
+impl RateLimitSection {
+    #[must_use]
+    pub fn to_runtime_config(&self) -> RateLimitConfig {
+        RateLimitConfig {
+            enabled: self.enabled.unwrap_or(false),
+            window_secs: self.window_secs.unwrap_or(60),
+            max_bytes_per_identity: self.max_bytes_per_identity.unwrap_or(10 * 1024 * 1024),
+        }
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        if let Some(window_secs) = self.window_secs {
+            anyhow::ensure!(
+                window_secs > 0,
+                "rate_limit.window_secs must be greater than zero"
+            );
+        }
+
+        if let Some(max_bytes) = self.max_bytes_per_identity {
+            anyhow::ensure!(
+                max_bytes > 0,
+                "rate_limit.max_bytes_per_identity must be greater than zero"
+            );
+        }
+
+        Ok(())
+    }
+}
+
 impl Config {
     /// Load, parse, and validate a TOML config file.
     ///
@@ -62,6 +101,11 @@ impl Config {
 
         policy::parse_client_ext_oid(&self.policy.client_ext_oid)?;
         self.policy.validate()?;
+
+        if let Some(rate_limit) = &self.rate_limit {
+            rate_limit.validate()?;
+        }
+
         Ok(())
     }
 }
