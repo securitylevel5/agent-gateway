@@ -1,0 +1,8 @@
+/target
+.cursor/
+__pycache__/
+
+# Local secrets / environment
+.env
+.env.*
+!.env.example
