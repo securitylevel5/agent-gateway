@@ -159,7 +159,7 @@ Checked SQLx query macros compile against committed `.sqlx` metadata by default,
 Regenerate the metadata after changing migrations or SQL query text:
 
 ```bash
-cargo install sqlx-cli --version 0.8.6 --locked --no-default-features --features postgres
+cargo install sqlx-cli --version 0.9.0 --locked --no-default-features --features postgres
 SQLX_OFFLINE=false DATABASE_URL="$TEST_DATABASE_URL" cargo sqlx database setup
 SQLX_OFFLINE=false DATABASE_URL="$TEST_DATABASE_URL" cargo sqlx prepare -- --all-targets --locked
 ```

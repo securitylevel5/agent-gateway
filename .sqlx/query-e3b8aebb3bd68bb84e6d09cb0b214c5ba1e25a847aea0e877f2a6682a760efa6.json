@@ -6,72 +6,151 @@
       {
         "ordinal": 0,
         "name": "permission_id",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "permission_registry",
+            "name": "permission_id"
+          }
+        }
       },
       {
         "ordinal": 1,
         "name": "subject_identity",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "permission_registry",
+            "name": "subject_identity"
+          }
+        }
       },
       {
         "ordinal": 2,
         "name": "subject_public_key_spki_der",
-        "type_info": "Bytea"
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "permission_registry",
+            "name": "subject_public_key_spki_der"
+          }
+        }
       },
       {
         "ordinal": 3,
         "name": "destination",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "permission_registry",
+            "name": "destination"
+          }
+        }
       },
       {
         "ordinal": 4,
         "name": "signing_key_id",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "permission_registry",
+            "name": "signing_key_id"
+          }
+        }
       },
       {
         "ordinal": 5,
         "name": "permission_not_before!",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "permission_registry",
+            "name": "not_before"
+          }
+        }
       },
       {
         "ordinal": 6,
         "name": "permission_not_after!",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "permission_registry",
+            "name": "not_after"
+          }
+        }
       },
       {
         "ordinal": 7,
         "name": "signature",
-        "type_info": "Bytea"
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "permission_registry",
+            "name": "signature"
+          }
+        }
       },
       {
         "ordinal": 8,
         "name": "signer_algorithm!",
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "principal_signing_keys",
+            "name": "algorithm"
+          }
+        }
       },
       {
         "ordinal": 9,
         "name": "signer_public_key_spki_der!",
-        "type_info": "Bytea"
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "principal_signing_keys",
+            "name": "public_key_spki_der"
+          }
+        }
       },
       {
         "ordinal": 10,
         "name": "signer_not_before!",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "principal_signing_keys",
+            "name": "not_before"
+          }
+        }
       },
       {
         "ordinal": 11,
         "name": "signer_not_after!",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "principal_signing_keys",
+            "name": "not_after"
+          }
+        }
       },
       {
         "ordinal": 12,
         "name": "signer_revoked_at",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "principal_signing_keys",
+            "name": "revoked_at"
+          }
+        }
       },
       {
         "ordinal": 13,
         "name": "signer_active_now!",
-        "type_info": "Bool"
+        "type_info": "Bool",
+        "origin": "Expression"
       }
     ],
     "parameters": {
