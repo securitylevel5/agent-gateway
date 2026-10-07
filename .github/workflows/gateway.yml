@@ -19,6 +19,16 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
   test:
     runs-on: ubuntu-latest
     services:
@@ -50,7 +60,7 @@ jobs:
 
   image:
     runs-on: ubuntu-latest
-    needs: test
+    needs: [lint, test]
     if: github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@v5

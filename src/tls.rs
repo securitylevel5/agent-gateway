@@ -1,5 +1,3 @@
-use std::fs::File;
-use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -10,6 +8,7 @@ use rustls::{
     CertificateError, DigitallySignedStruct, DistinguishedName, Error as RustlsError, ServerConfig,
     SignatureScheme,
 };
+use rustls_pki_types::pem::{self, PemObject};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
 pub use tokio_rustls::TlsAcceptor;
 use x509_parser::prelude::*;
@@ -119,16 +118,16 @@ fn parse_certificate(cert: &CertificateDer<'_>) -> Result<(), RustlsError> {
 }
 
 fn load_cert_chain(path: &Path) -> anyhow::Result<Vec<CertificateDer<'static>>> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let certs = rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>()?;
+    let certs = CertificateDer::pem_file_iter(path)
+        .with_context(|| format!("opening {}", path.display()))?
+        .collect::<Result<Vec<_>, _>>()?;
     ensure!(!certs.is_empty(), "no certificates in {}", path.display());
     Ok(certs)
 }
 
 fn load_private_key(path: &Path) -> anyhow::Result<PrivateKeyDer<'static>> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    rustls_pemfile::private_key(&mut reader)?
-        .ok_or_else(|| anyhow!("no private key in {}", path.display()))
+    match PrivateKeyDer::from_pem_file(path) {
+        Err(pem::Error::NoItemsFound) => Err(anyhow!("no private key in {}", path.display())),
+        res => res.with_context(|| format!("reading private key {}", path.display())),
+    }
 }
