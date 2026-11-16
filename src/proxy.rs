@@ -174,8 +174,7 @@ impl MakeProxyService {
 #[must_use]
 pub fn extract_peer_certs(conn: &ServerConnection) -> Vec<CertificateDer<'static>> {
     conn.peer_certificates()
-        .map(<[CertificateDer<'_>]>::to_vec)
-        .unwrap_or_default()
+        .map_or_default(<[CertificateDer<'_>]>::to_vec)
 }
 
 fn log_denial(
