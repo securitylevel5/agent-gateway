@@ -25,10 +25,10 @@ async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-tracing-opentelemetry = "0.32"
-opentelemetry = "0.31"
-opentelemetry_sdk = { version = "0.31", default-features = false, features = ["rt-tokio", "trace"] }
-opentelemetry-otlp = { version = "0.31", default-features = false, features = ["grpc-tonic", "trace"] }
+tracing-opentelemetry = "0.33"
+opentelemetry = "0.32"
+opentelemetry_sdk = { version = "0.32.1", default-features = false, features = ["rt-tokio", "trace"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["grpc-tonic", "trace"] }
 anyhow = "1"
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "macros"] }
 chrono = "0.4.44"
