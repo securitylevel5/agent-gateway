@@ -6,3 +6,5 @@
 /logs.txt
 /*.log
 /*.jsonl
+/.env
+/.env.*
